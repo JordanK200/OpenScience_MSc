@@ -1,10 +1,13 @@
-# Data_Cleaning_Summary.Rmd
+# Code Directory
 
-Dataset_Summary.Rmd cleans, merges, and validates author-level publication data with NSERC and CIHR funding records, producing a unified dataset and summary statistics.
+This directory contains all scripts and code used in this project.
 
-It sources the following scripts:
-- CIHR_Cleaning.R
-- NSERC_Cleaning.R
-- PLOS_Cleaning.R
+Files are numbered in the correct sequence in which they should be run to reproduce the full scraping, cleaning, and analysis workflow.
 
-These scripts are used to clean the specified raw data.
+## NSERC Scrape
+
+This script is still a work in progress. We are currently exploring the best method for retrieving associated institution information.
+
+## Data Cleaning
+
+This R Markdown file documents and executes each step of the data-cleaning process.

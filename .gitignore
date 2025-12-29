@@ -1,5 +1,15 @@
-# Ignore data files
-/data
+# Ignore everything under data
+data/**
+
+# Allow directories so Git can traverse them
+!data/
+!data/**/
+
+# Allow README files anywhere under data
+!data/**/README.md
+
+# Ignore WIP directory
+/WIP
 
 # MacOS
 .DS_Store
