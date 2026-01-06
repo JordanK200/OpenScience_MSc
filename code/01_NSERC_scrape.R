@@ -26,8 +26,8 @@ library(magrittr) # for pipes
 # This worked for me
 
 selenium_server <- rsDriver(
-  browser = "firefox",
-  chromever = NULL,
+  browser = "chrome",
+  #chromever = NULL,
   phantomver = NULL
 )
 # initiate the driver; will launch Firefox
@@ -106,6 +106,12 @@ get_elements <- function(elementPath = NULL){
   return(values)
 }
 
+get_attributes <- function(elementPath = NULL, attribute = NULL){
+  element <- driver$findElements(using = "xpath", elementPath)
+  values <- unlist(lapply(element, function(x) x$getElementAttribute(attribute)))
+  return(values)
+}
+
 # specific functions for each column, call get_elements()
 get_names <- function(){
   get_elements(subset(extraction_elements, element == "name", select = "xpath", drop = TRUE))
@@ -121,6 +127,9 @@ get_year <- function(){
 }
 get_program <- function(){
   get_elements(subset(extraction_elements, element == "program", select = "xpath", drop = TRUE))
+}
+get_urls <- function(){
+  get_attributes(paste0(subset(extraction_elements, element == "project_title", select = "xpath", drop = TRUE), "/a"), "href")
 }
 
 # need a pause here (JASON)
@@ -144,6 +153,7 @@ project_title <- vector(length = total_records)
 amount <- vector(length = total_records)
 year <- vector(length = total_records)
 program <- vector(length = total_records)
+url <- vector(length = total_records)
 
 # need to keep an index track for populating the placeholders
 counter <- 1
@@ -165,6 +175,7 @@ for(page in 1:pages){
   amount[start:end] <- get_amount()
   year[start:end] <- get_year()
   program[start:end] <- get_program()
+  url[start:end] <- get_urls()
   next_button$clickElement()
   counter <- counter + results_per_page
   cat(paste0("Total records retrieved: ", counter, "\n"))
@@ -185,7 +196,8 @@ df <- data.frame(
   project_title,
   amount,
   year,
-  program
+  program,
+  url
 )
 
 return(df)
