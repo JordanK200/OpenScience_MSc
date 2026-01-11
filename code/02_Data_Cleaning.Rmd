@@ -20,11 +20,6 @@ library(here)
 library(openalexR)
 ```
 
-# Testing
-```{r}
-OATest <- oa_fetch(doi = PLOS_Data$DOI)
-```
-
 # Data Download
 
 For now, I've uploaded the raw data to a public Google drive. The following code chunk first checks to see if these raw files have already been downloaded locally, and if not, it downloads them from the Google drive to data/raw-data directory.
