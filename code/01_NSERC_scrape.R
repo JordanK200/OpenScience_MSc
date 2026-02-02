@@ -1,97 +1,126 @@
-library(chromote)
+library(rvest)
+library(stringr)
+library(stringi)
+library(httr2)
+library(tidyverse)
+library(readxl)
 
-b <- ChromoteSession$new()
+# Link to NSERC's Awards Data
+page_url <- "https://open.canada.ca/data/en/dataset/c1b0f627-8c29-427c-ab73-33968ad9176e"
 
-# In a web browser, open a viewer for the headless browser.
-b$view()
+# Create a session temp directory for downloads
+tmp_dir <- file.path(tempdir(), "nserc_downloads")
+dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE)
 
-# Go to the NSERC Website
-b$go_to("https://www.nserc-crsng.gc.ca/ase-oro/index_eng.asp")
+message("Using temp directory: ", tmp_dir)
 
-# Wait 20 seconds for page to load
-Sys.sleep(20)
+# Scrape all links on the page
+links <- read_html(page_url) %>%
+  html_elements("a") %>%
+  html_attr("href") %>%
+  unique() %>%
+  na.omit()
 
-# Select fiscal year dropdown
-b$Runtime$evaluate("document.querySelector('button.ui-multiselect').click()")
-Sys.sleep(2)
+# Make absolute URLs if needed
+links <- url_absolute(links, page_url)
 
-# Select 2012
-b$Runtime$evaluate("document.querySelector('input[name=\"multiselect_fiscalyearfrom\"][value=\"2012\"]').click()")
-Sys.sleep(2)
+# Extract fiscal year from award/Expenditures file names
+link_tbl <- tibble(
+  url = links,
+  filename = basename(links),
+  year = coalesce(
+    str_extract(filename, "\\d{4}(?=_award)"),
+    str_extract(filename, "\\d{4}(?=_Expenditures)")
+  )
+)
 
-# Expand advanced search
-b$Runtime$evaluate("document.querySelector('.toggle-link-expand')?.click()")
-Sys.sleep(2)
+# Filter to target years
+link_tbl <- link_tbl %>%
+  mutate(year = as.integer(year)) %>%
+  filter(between(year, 2012, 2024)) %>%
+  arrange(year)
 
-# Select program drop down
-b$Runtime$evaluate("document.querySelector('#program + button.ui-multiselect')?.click()")
-Sys.sleep(2)
-
-# Select "Discovery Grants Program - Individual"
-b$Runtime$evaluate("document.querySelector('label[for=\"ui-multiselect-program-option-95\"]')?.click()")
-Sys.sleep(2)
-
-# Click the search button
-b$Runtime$evaluate("document.querySelector('#buttonSearch')?.click()")
-Sys.sleep(20)
-
-# Expand the search results to show 200 per page
-b$Runtime$evaluate("
-const sel = document.querySelector('#result_length select');
-sel.value = '200';
-sel.dispatchEvent(new Event('change', {bubbles:true}));
-")
-
-Sys.sleep(20)
-
-# JS snippet to grab the current page rows
-get_rows_json <- "
-(() => {
-  const rows = Array.from(document.querySelectorAll('#result tbody tr'));
-  const out = rows.map(tr => {
-    const tds = Array.from(tr.querySelectorAll('td'));
-    const link = tds[1]?.querySelector('a');
-    return {
-      name:   tds[0]?.innerText.trim() ?? null,
-      title:  link?.innerText.trim() ?? tds[1]?.innerText.trim() ?? null,
-      href:   link?.getAttribute('href') ?? null,
-      amount: tds[2]?.innerText.trim() ?? null,
-      year:   tds[3]?.innerText.trim() ?? null,
-      program:tds[4]?.innerText.trim() ?? null
-    };
-  });
-  return JSON.stringify(out);
-})()
-"
-
-# Loop through all pages
-
-all_pages <- list()
-i <- 1
-
-repeat {
-  res <- b$Runtime$evaluate(get_rows_json, returnByValue = TRUE)
-  page_df <- jsonlite::fromJSON(res$result$value)
+# Function that downloads each file into the temp directory
+download_one <- function(url, filename, out_dir) {
   
-  if (nrow(page_df) == 0) stop("No rows found.")
+  dest <- file.path(out_dir, filename)
   
-  all_pages[[i]] <- page_df
-  message("Pages scraped: ", i, " | Rows total: ", sum(vapply(all_pages, nrow, 1L)))
-  i <- i + 1
+  if (file.exists(dest)) {
+    message("Already exists: ", filename)
+    return(dest)
+  }
   
-  nxt <- b$Runtime$evaluate("
-(() => {
-  const el = document.querySelector('#result_next');
-  if (!el) return true;
-  return el.classList.contains('paginate_button_disabled');
-})()
-")$result$value
-  if (isTRUE(nxt)) break
+  request(url) |>
+    req_user_agent("R downloader (Jordan)") |>
+    req_perform() |>
+    resp_body_raw() |>
+    writeBin(dest)
   
-  b$Runtime$evaluate("document.querySelector('#result_next')?.click()")
-  Sys.sleep(5)
+  message("Downloaded: ", filename)
+  dest
 }
 
-df <- do.call(rbind, all_pages)
+# Download awards data into temp directory
+download_paths <- purrr::pwalk(
+  link_tbl,
+  ~ download_one(..1, ..2, tmp_dir)
+)
 
-write.csv(df, here::here("data", "raw-data", "RAW_NSERC.csv"))
+# Find paths to each downloaded file
+files <- list.files(
+  tmp_dir,
+  pattern = "\\.(csv|xlsx|xls)$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+
+# Load all files
+data_list <- purrr::map(files, function(path) {
+  ext <- tolower(tools::file_ext(path))
+  
+  if (ext == "csv") {
+    readr::read_csv(path, show_col_types = FALSE, col_types = cols(.default = col_character()))
+  } else {
+    readxl::read_excel(path, col_types = "text")
+  }
+})
+
+# Assign file names
+names(data_list) <- basename(files)
+
+# Fix column name encoding inconsistencies
+data_list_clean <- purrr::map(data_list, function(df) {
+  nm <- names(df)
+  
+  if (any(!stringi::stri_enc_isutf8(nm))) {
+    nm2 <- iconv(nm, from = "latin1", to = "UTF-8")
+    nm2[is.na(nm2)] <- nm[is.na(nm2)]
+    names(df) <- nm2
+  }
+  
+  df
+})
+
+# Fix naming issues
+data_list_clean <- map(data_list_clean, \(df) {
+  df %>%
+    rename(ProgramName = any_of(c("ProgramNaneEN", "ProgramNameEN"))) %>%
+    rename(Department  = any_of(c("Department-Département", "DepartmentEN"))) %>%
+    rename(Institution = any_of(c("Institut", "Institution-Établissement"))) %>%
+    rename(FiscalYear  = any_of("FiscalYear-Exercice financier")) %>%
+    rename(CompetitionYear = any_of("CompetitionYear-Année de concours"))
+})
+
+  
+# Bind list variables into one big df
+data_df <- bind_rows(data_list_clean)
+
+# Only keep "Discovery Grants Program - Individual" rows 
+data_df_discovery <- data_df %>%
+  filter(ProgramName == "Discovery Grants Program - Individual")
+
+# After filtering, there should be 131957 rows
+# This matches the number of rows when using the NSERC awards website
+
+# Save data
+write_csv(data_df_discovery, file = file.path("data", "raw-data", "RAW_NSERC.csv"))

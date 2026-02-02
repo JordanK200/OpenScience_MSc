@@ -3,10 +3,10 @@
 This directory organizes data at different stages of processing:
 
 - **raw-data** – Original, unmodified input data.  
-- **intermediate-data** – Partially cleaned data produced after time-consuming preprocessing steps.  
+- **intermediate-data** – Partially cleaned data produced after time-consuming cleaning steps.  
 - **clean-data** – Fully processed data ready for analysis.  
 
-All raw data is stored on Google Drive:  
+All raw data is stored on Google Drive (Last updated = 02-02-2026):  
 [Google Drive Folder](https://drive.google.com/drive/folders/1FSxIsOkGuVqUTiFzEPaC4xpr_r5OvzNJ?usp=sharing)
 
 ## Usage

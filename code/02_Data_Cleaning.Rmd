@@ -1,13 +1,17 @@
 ---
-title: "Dataset_Summary"
+title: "02_Data_Cleaning"
 author: "Jordan Katchen"
-date: "2025-11-13"
+date: "2026-01-23"
 output: html_document
 ---
+
+
 # Introduction
+
 This file cleans and merges the raw PLOS data, CIHR funding data, and NSERC funding data.
 
 # Library
+
 ```{r}
 library(tidyverse)
 library(rcrossref)
@@ -24,7 +28,10 @@ library(openalexR)
 
 For now, I've uploaded the raw data to a public Google drive. The following code chunk first checks to see if these raw files have already been downloaded locally, and if not, it downloads them from the Google drive to data/raw-data directory.
 
+The NSERC and CIHR raw data can also be easily downloaded using the `01_CIHR_scrape.R` and `01_NSERC_scrape.R` scripts.
+
 Data can be found: https://drive.google.com/drive/folders/1FSxIsOkGuVqUTiFzEPaC4xpr_r5OvzNJ?usp=sharing
+
 ```{r}
 # --- Define Files ---
 # For each file: Google Drive ID and local path
@@ -75,165 +82,147 @@ PLOS_Data <- PLOS_Data %>%
   filter(Corresponding_Author_Country == "Canada" | First_Author_Country == "Canada")
 ```
 
-Fetch CrossRef metadata using study DOIs.
-```{r, eval=FALSE}
-CR_PLOS_Data <- cr_works(dois = PLOS_Data$DOI, .progress = "text")
+Fetch Open Alex metadata using study DOIs.
+```{r}
+OA_PLOS_Data <- oa_fetch(doi = PLOS_Data$DOI)
 ```
 
-Extract author data from CR_PLOS_Data list.
-```{r, eval=FALSE}
-CR_Author_Data <- CR_PLOS_Data$data %>%
-  select(doi, author) %>%
-  unnest(author)
-```
-
-Creating a column that has authors full name and removing non-ASCII characters.
-```{r, eval=FALSE}
-CR_Author_Data <- CR_Author_Data %>%
-  mutate(author_full = stri_trans_general(paste(given, family, sep = " "), "Latin-ASCII"))
-```
-
-Removing the unnecessary columns from the CR output. If suffix is not removed, there is an error because parse_names also produces a suffix column.
-```{r, eval=FALSE}
-CR_Author_Data <- select(CR_Author_Data, c("doi", "ORCID", "authenticated.orcid", "sequence", "author_full"))
+Isolate author and institution information from Open Alex search. This results in having a single row for each publication, author, institution combination.
+```{r}
+OA_PLOS_Data <- OA_PLOS_Data %>%
+  select(doi, authorships) %>%
+  unnest(authorships) %>%
+  rename(author_id = id, author_display_name = display_name) %>%
+  unnest(affiliations) %>%
+  rename(institution = id, institution_display_name = display_name)
 ```
 
 Use `parse_names()` to split author names into components. Using the `parse_names()` function allows us to have a consistent method of formatting author names across all data sets.
-```{r, eval=FALSE}
-# Using parse_names() to break up author names into components
-CR_Author_Data <- cbind(CR_Author_Data, parse_names(CR_Author_Data$author_full))
-
-# Removing old author name column
-CR_Author_Data <- select(CR_Author_Data, -author_full)
-```
-
-To further simplify naming columns, lets make all characters lower case and remove punctuation.
-```{r, eval=FALSE}
-CR_Author_Data <- CR_Author_Data %>%
-  mutate(
-    across(
-      c(first_name, middle_name, last_name, salutation, suffix),
-      ~ str_squish(str_remove_all(str_to_lower(.x), "[[:punct:]]"))
-    )
-  )
-```
-
-Save data.
-```{r, eval=FALSE}
-write_csv(CR_Author_Data, file = here("data/intermediate-data/CR_PLOS_Hold.csv"))
-```
-
-Read in saved data.
 ```{r}
-CR_Author_Data <- read_csv(here("data/intermediate-data/CR_PLOS_Hold.csv"), guess_max = 6000)
+OA_PLOS_Data <- cbind(OA_PLOS_Data, parse_names(OA_PLOS_Data$author_display_name))
 ```
 
-Clean environment.
+Creating and applying a function that will clean and standardize important text columns. These columns will be used later for joining, so it is important to try and remove inconsistencies.
 ```{r}
-rm(CR_PLOS_Data, PLOS_Comparator, PLOS_Main)
+# Create a standardizing function - removes all special characters
+standardize_text <- function(x) {
+  x <- as.character(x)
+  
+  x %>%
+    stringi::stri_trans_general("Latin-ASCII") %>% # Remove special characters
+    stringr::str_replace_all("[^A-Za-z0-9]+", "") %>% # Remove aLL non-alphanumeric characters
+    tolower() %>% # Make text lowercase
+    trimws() # Remove trailing and leading white space
+}
+
+# Select columns to standardize
+cols_to_clean <- c("institution_display_name", "first_name", "last_name")
+
+# Apply standardizing function and create combined variable
+OA_PLOS_Data <- OA_PLOS_Data %>%
+  mutate(across(all_of(cols_to_clean), standardize_text)) %>%
+  mutate(combined_id = paste(first_name, last_name, institution_display_name, sep = "_"))
+```
+
+Save data to the intermediate-data directory.
+```{r}
+write_csv(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.csv"))
+```
+
+Read in saved intermediate data.
+```{r}
+OA_PLOS_Data <- read_csv(here("data/intermediate-data/OA_PLOS_Hold.csv"), guess_max = 6000)
+```
+
+Clean intermediary objects from the environment.
+```{r}
+rm(PLOS_Comparator, PLOS_Main, cols_to_clean)
 ```
 
 # NSERC Data Cleaning
 
 Load the NSERC funding data.
 ```{r}
-nserc_data <- read_csv(here("data/raw-data/RAW_NSERC.csv"))
+nserc_data <- readr::read_csv(
+  here("data/raw-data/RAW_NSERC.csv"),
+  col_types = readr::cols(.default = "c")
+)    
 ```
 
-Remove non-ASCII characters from author names.
+Fixing encoding issues. Attempts to convert only problematic character values from latin1 to UTF-8, while leaving already-valid UTF-8 values unchanged.
 ```{r}
-nserc_data$Name <- stri_trans_general(nserc_data$Name, "Latin-ASCII")
+code_fix <- function(x) {
+  
+  # Only operate on character vectors
+  if (!is.character(x)) return(x)
+
+  # Check whether each element is valid UTF-8 (TRUE / FALSE / NA)
+  ok <- stringi::stri_enc_isutf8(x)
+
+  # Treat invalid or unknown encodings as needing conversion
+  bad <- is.na(ok) | !ok
+
+  # Fast exit if nothing needs fixing
+  if (!any(bad)) return(x)
+
+  # Convert only problematic elements
+  y <- x
+  y[bad] <- iconv(x[bad], from = "latin1", to = "UTF-8")
+
+  # If conversion fails, keep original value
+  y[is.na(y)] <- x[is.na(y)]
+
+  y
+}
+
+# Apply the function
+nserc_data <- nserc_data %>%
+  dplyr::mutate(dplyr::across(everything(), code_fix))
 ```
 
-Convert `Fiscal Year` to a clean numeric. `Fiscal Year` is currently formatted like: 2025-2026. We will isolate the leading year.
+Convert `FiscalYear` and `AwardAmount` to numeric.
 ```{r}
 nserc_data <- nserc_data %>%
-  mutate(`Fiscal Year` = as.numeric(sub("-.*", "", `Fiscal Year`)))
+  mutate(FiscalYear = as.numeric(FiscalYear),
+         AwardAmount = as.numeric(AwardAmount))
 ```
 
 Use `parse_names()` to split recipient names into components.
 ```{r}
 # Using format_reverse to prepare names for the parse_names function
-nserc_data$Name <- humaniformat::format_reverse(nserc_data$Name)
+nserc_data$`Name-Nom` <- humaniformat::format_reverse(nserc_data$`Name-Nom`)
 
 # Splitting names into components
-nserc_data <- cbind(nserc_data, parse_names(nserc_data$Name))
+nserc_data <- cbind(nserc_data, parse_names(nserc_data$`Name-Nom`))
 
 # Removing original name column
-nserc_data <- select(nserc_data, -Name)
+nserc_data <- select(nserc_data, -`Name-Nom`)
 ```
 
-Because the way middle names are recorded can vary significantly, we prefer to manage authors using only their first and last names. However, middle names are sometimes necessary to distinguish between authors who share the same first and last name. The code chunk below identifies authors with identical first and last names but differing middle names, salutations, or suffixes. This separate group of authors will be handled in all downstream analyses using their first, **middle**, and last names.
+Use the function created above in the PLOS section to standardize important text columns.
 ```{r}
-# First clean names by removing white spaces, making all characters lowercase, and removing punctuation. 
+# Select columns to standardize
+cols_to_clean2 <- c("Institution", "first_name", "last_name")
+
+# Apply standardizing function and create combined variable
 nserc_data <- nserc_data %>%
-  mutate(
-    across(
-      c(first_name, middle_name, last_name, salutation, suffix),
-      ~ str_squish(str_remove_all(str_to_lower(.x), "[[:punct:]]"))
-    )
-  )
-
-# Now identify author conflicts
-nserc_conflicts <- nserc_data %>%
-  group_by(first_name, last_name) %>%
-  filter(
-    n_distinct(middle_name, na.rm = TRUE) > 1 |
-      n_distinct(salutation, na.rm = TRUE) > 1 |
-      n_distinct(suffix, na.rm = TRUE) > 1
-  ) %>%
-  arrange(first_name, last_name)
+  mutate(across(all_of(cols_to_clean2), standardize_text)) %>%
+  mutate(combined_id = paste(first_name, last_name, Institution, sep = "_"))
 ```
 
-After manual review, some names were removed from the conflict subset because, despite discrepancies in their recorded middle names, it was clear that the records referred to the same individual. For example, Abu Hena Md Billah and Abu Hena Md Muntasir Billah were determined to represent the same author.
+Summarize the funding information for every author.
 ```{r}
-# Making a list of false-conflict authors.
-remove_names <- tibble::tibble(
-  first_name = c("abu", "chi", "joao", "maria", "ronaldo"),
-  last_name  = c("billah", "chung", "trovao", "carvalho", "cerri")
-)
-  
-# Separating false-conflicts from true-conflicts data
-nserc_conflicts <- nserc_conflicts %>%
-  anti_join(remove_names, by = c("first_name", "last_name"))
-```
-
-We will then remove conflict names from the main NSERC data set.
-```{r}
-# Separate conflict from non-conflict data 
-nserc_data <- nserc_data %>% anti_join(nserc_conflicts, by = c("first_name", "last_name"))
-```
-
-Finally, we will summarize the funding information for every author.
-```{r}
-# Summaries for clean (non-conflict) authors using first and last name
+# Summaries for authors using firstname, lastname, and institution information
 nserc_summary <- nserc_data %>%
-  group_by(first_name, last_name) %>%
+  group_by(combined_id) %>%
   summarise(
     n_awards_NSERC = n(),
-    total_amount_NSERC = sum(`Amount($)`, na.rm = TRUE),
-    oldest_year_NSERC = min(`Fiscal Year`, na.rm = TRUE),
-    newest_year_NSERC = max(`Fiscal Year`, na.rm = TRUE),
+    total_amount_NSERC = sum(`AwardAmount`, na.rm = TRUE),
+    oldest_year_NSERC = min(`FiscalYear`, na.rm = TRUE),
+    newest_year_NSERC = max(`FiscalYear`, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   arrange(desc(total_amount_NSERC))
-  
-# Summaries for conflict authors (keep middle name)
-nserc_summary_conflicts <- nserc_conflicts %>%
-  group_by(first_name, middle_name, last_name) %>%
-  summarise(
-    n_awards_NSERC = n(),
-    total_amount_NSERC = sum(`Amount($)`, na.rm = TRUE),
-    oldest_year_NSERC = min(`Fiscal Year`, na.rm = TRUE),
-    newest_year_NSERC = max(`Fiscal Year`, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(total_amount_NSERC))
-```
-
-Clean global environment.
-```{r}
-rm(remove_names, nserc_data, nserc_conflicts)
 ```
 
 # CIHR Data Cleaning
@@ -243,16 +232,11 @@ Load the CIHR funding data.
 cihr_data <- read_csv(here("data/raw-data/RAW_CIHR.csv"))
 ```
 
-Clean all text columns (fix encoding, remove accents, trim)
+Using the code_fix function created earlier to convert only problematic character values from latin1 to UTF-8, while leaving already-valid UTF-8 values unchanged.
 ```{r}
+# Apply the function
 cihr_data <- cihr_data %>%
-  mutate(across(
-    where(is.character),
-    ~ .x %>%
-      iconv(from = "latin1", to = "UTF-8") %>%        # Fix encoding (e.g., é → UTF-8)
-      stri_trans_general("Latin-ASCII") %>%           # Convert accents to ASCII (é → e)
-      trimws()                                        # Remove leading/trailing whitespace
-  ))
+  dplyr::mutate(dplyr::across(everything(), code_fix))
 ```
 
 Convert the CIHR_Contribution column to numeric, removing the `$` and `,`.
@@ -283,51 +267,22 @@ cihr_data <- cbind(cihr_data, parse_names(cihr_data$Name))
 cihr_data <- select(cihr_data, -Name)
 ```
 
-Just like with the NSERC data, let's identify unique recipients with the same first and last name.
+Use the function created above in the PLOS section to standardize important text columns.
 ```{r}
-# First clean names by removing white spaces, making all characters lowercase, and removing punctuation. 
+# Select columns to standardize
+cols_to_clean3 <- c("Institution_Paid", "first_name", "last_name")
+
+# Apply standardizing function and create combined variable
 cihr_data <- cihr_data %>%
-  mutate(
-    across(
-      c(first_name, middle_name, last_name, salutation, suffix),
-      ~ str_squish(str_remove_all(str_to_lower(.x), "[[:punct:]]"))
-    )
-  )
-
-# Now identify author conflicts
-cihr_conflicts <- cihr_data %>%
-  group_by(first_name, last_name) %>%
-  filter(
-    n_distinct(middle_name, na.rm = TRUE) > 1 |
-      n_distinct(salutation, na.rm = TRUE) > 1 |
-      n_distinct(suffix, na.rm = TRUE) > 1
-  ) %>%
-  arrange(first_name, last_name)
-```
-
-Unlike the NSERC data, there are no obvious false conflicts, so no need for manual adjusting. We will remove the authors with name conflicts from the main CIHR data set. 
-```{r}
-# Separate conflict from non-conflict data
-cihr_data <- cihr_data %>% anti_join(cihr_conflicts, by = c("first_name", "last_name"))
+  mutate(across(all_of(cols_to_clean3), standardize_text)) %>%
+  mutate(combined_id = paste(first_name, last_name, Institution_Paid, sep = "_"))
 ```
 
 Summarize the CIHR funding information for every author.
 ```{r}
 # Summaries for clean (non-conflict) authors using first and last name
 cihr_summary <- cihr_data %>%
-  group_by(first_name, last_name) %>%
-  summarise(
-    n_awards_CIHR = n(),
-    total_amount_CIHR = sum(CIHR_Contribution, na.rm = TRUE),
-    oldest_year_CIHR = min(Year, na.rm = TRUE),
-    newest_year_CIHR = max(Year, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(total_amount_CIHR))
-  
-# Summaries for conflict authors (keep middle name)
-cihr_summary_conflicts <- cihr_conflicts %>%
-  group_by(first_name, middle_name, last_name) %>%
+  group_by(combined_id) %>%
   summarise(
     n_awards_CIHR = n(),
     total_amount_CIHR = sum(CIHR_Contribution, na.rm = TRUE),
@@ -338,193 +293,50 @@ cihr_summary_conflicts <- cihr_conflicts %>%
   arrange(desc(total_amount_CIHR))
 ```
 
-Clean global environment.
+# Combining Data 
+
+Combine all the author data together by the `combined_id` variable.
 ```{r}
-rm(cihr_data, cihr_conflicts)
-```
+# Removing unnecessary columns
+OA_PLOS_Data <- OA_PLOS_Data %>%
+  select(doi, combined_id)
 
-# Combining Funding and Author Data
-We will start by adding the NSERC funding data to the PLOS author data.
+# Joining data
+author_data <- OA_PLOS_Data %>%
+  left_join(nserc_summary, by = "combined_id") %>%
+  left_join(cihr_summary, by = "combined_id")
 
-1. We first left_join the main NSERC data by first and last name. This can be safely done because we have already checked the NSERC funding data for potential instances were different authors share the same first and last name.
-2. We then left_join the NSERC naming conflict data by first, middle, and last name.
-3. Finally, we clean up the resulting columns.
-
-**Note:** We have not checked the PLOS author list for first and last name conflicts... We will do this down stream.
-
-```{r}
-# 1) Join NSERC funding by first + last name
-Author_Funding_Data <- CR_Author_Data %>%
-  left_join(
-    nserc_summary,
-    by = c("first_name", "last_name")
-)
-
-# 2) Add NSERC conflict info by first + middle + last name
-Author_Funding_Data <- Author_Funding_Data %>%
-  left_join(
-    nserc_summary_conflicts,
-    by = c("first_name", "middle_name", "last_name")
-  )
-
-# 3) Combine NSERC columns
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_NSERC = coalesce(n_awards_NSERC.x, 0) + coalesce(n_awards_NSERC.y, 0),
-    total_amount_NSERC = coalesce(total_amount_NSERC.x, 0) + coalesce(total_amount_NSERC.y, 0),
-    oldest_year_NSERC = pmin(oldest_year_NSERC.x, oldest_year_NSERC.y, na.rm = TRUE),
-    newest_year_NSERC = pmax(newest_year_NSERC.x, newest_year_NSERC.y, na.rm = TRUE)
-  ) %>%
-  select(
-    -ends_with(".x"),
-    -ends_with(".y")
-  )
-```
-
-Now let's do the exact same thing with the CIHR data.
-```{r}
-# 1) Join CIHR funding by first + last name
-Author_Funding_Data <- Author_Funding_Data %>%
-  left_join(
-    cihr_summary,
-    by = c("first_name", "last_name")
-  )
-
-# 2) Add CIHR conflict info by first + middle + last name
-Author_Funding_Data <- Author_Funding_Data %>%
-  left_join(
-    cihr_summary_conflicts,
-    by = c("first_name", "middle_name", "last_name")
-  )
-
-# 3) Combine CIHR columns
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_CIHR = coalesce(n_awards_CIHR.x, 0) + coalesce(n_awards_CIHR.y, 0),
-    total_amount_CIHR = coalesce(total_amount_CIHR.x, 0) + coalesce(total_amount_CIHR.y, 0),
-    oldest_year_CIHR = pmin(oldest_year_CIHR.x, oldest_year_CIHR.y, na.rm = TRUE),
-    newest_year_CIHR = pmax(newest_year_CIHR.x, newest_year_CIHR.y, na.rm = TRUE),
-  ) %>%
-  select(
-    -ends_with(".x"),
-    -ends_with(".y")
-  )
-```
-
-Remove rows with no funding information.
-```{r}
-Author_Funding_Data <- Author_Funding_Data %>%
+# Remove rows without funding info
+author_data <- author_data %>%
   filter(n_awards_NSERC > 0 | n_awards_CIHR > 0)
 ```
 
-Fix remaining name conflicts by identifying rows with the same first and last name but different middle names. Although this issue has already been resolved for the CIHR and NSERC data, it has not yet been addressed for the Crossref data. Conflicts could arise because most funding information was added to the Crossref data using only first and last names, so two different people may be given the same funding data if they share the same first and last name. This step was deferred until now to avoid resolving conflicts for authors without funding information.
+Adding author data to PLOS data.
 ```{r}
-Author_Funding_conflicts <- Author_Funding_Data %>%
-  group_by(first_name, last_name) %>%
-  filter(
-    n_distinct(middle_name, na.rm = TRUE) > 1 |
-      n_distinct(salutation, na.rm = TRUE) > 1 |
-      n_distinct(suffix, na.rm = TRUE) > 1
-  ) %>%
-  arrange(first_name, last_name)
-```
+# Removing http info from the author doi column
+author_data <- author_data %>%
+  mutate(doi = sub("^https://doi.org/", "", doi))  %>%
+  rename(DOI = doi)
 
-After manually reviewing the conflicts, the following changes needed to be made.
-```{r}
-# Removing NSERC awards from Andrew L. Mason
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_NSERC = if_else(doi == "Andrew L. Mason", 0, value),
-    total_amount_NSERC = if_else(doi == "Andrew L. Mason", 0, value),
-    oldest_year_NSERC = if_else(doi == "Andrew L. Mason", NA, value),
-    newest_year_NSERC = if_else(doi == "Andrew L. Mason", NA, value),
-  )
-
-# Removing CIHR awards from Andrew C. Mason
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_CIHR = if_else(full_name == "Andrew C. Mason", 0, value),
-    total_amount_CIHR = if_else(full_name == "Andrew C. Mason", 0, value),
-    oldest_year_CIHR = if_else(full_name == "Andrew C. Mason", NA, value),
-    newest_year_CIHR = if_else(full_name == "Andrew C. Mason", NA, value),
-  )
-
-# Removing CIHR awards from David M. Andrews
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_CIHR = if_else(full_name == "David M. Andrews", 0, value),
-    total_amount_CIHR = if_else(full_name == "David M. Andrews", 0, value),
-    oldest_year_CIHR = if_else(full_name == "David M. Andrews", NA, value),
-    newest_year_CIHR = if_else(full_name == "David M. Andrews", NA, value),
-  )
-
-# Removing NSERC awards from David W. Andrews
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_NSERC = if_else(doi == "Andrew L. Mason", 0, value),
-    total_amount_NSERC = if_else(doi == "Andrew L. Mason", 0, value),
-    oldest_year_NSERC = if_else(doi == "Andrew L. Mason", NA, value),
-    newest_year_NSERC = if_else(doi == "Andrew L. Mason", NA, value),
-  )
-
-# Removing NSERC awards from David J. T. Campbell
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_NSERC = if_else(doi == "David J. T. Campbell", 0, value),
-    total_amount_NSERC = if_else(doi == "David J. T. Campbell", 0, value),
-    oldest_year_NSERC = if_else(doi == "David J. T. Campbell", NA, value),
-    newest_year_NSERC = if_else(doi == "David J. T. Campbell", NA, value),
-  )
-
-# Removing CIHR awards from David A. Campbell/David Campbell
-Author_Funding_Data <- Author_Funding_Data %>%
-  mutate(
-    n_awards_CIHR = if_else(full_name == "David A. Campbell" | full_name == "David Campbell", 0, value),
-    total_amount_CIHR = if_else(full_name == "David A. Campbell" | full_name == "David Campbell", 0, value),
-    oldest_year_CIHR = if_else(full_name == "David A. Campbell" | full_name == "David Campbell", NA, value),
-    newest_year_CIHR = if_else(full_name == "David A. Campbell" | full_name == "David Campbell", NA, value),
-  )
-
-# Removing David M Evans, no actual funding information.
-Author_Funding_Data <- Author_Funding_Data %>%
-  filter(doi == "10.1371/journal.pmed.1003152")
-
-# David H. Evans highlights a huge issue... He is getting linked to NSERC funding information for David C. Evans... Both have many NSERC awards and both are listed as "Evans, David" for every award... If it wasn't for David M Evans, I would have never caught this issue...
-
-# Hao Zhang is another great example... 3+ authors have NSERC awards under the name Zhang, Hao...
-WIP
-```
-
-Cleaning global environment.
-```{r}
-rm(cihr_summary, cihr_summary_conflicts, nserc_summary, nserc_summary_conflicts, CR_Author_Data)
-```
-
-# Adding Funding Information To PLOS Data
-
-Add all the cleaned author and funding information to the PLOS data.
-```{r}
+# Joining data
 PLOS_Data <- PLOS_Data %>%
-  left_join(Author_Funding_Data, by = c("DOI" = "doi"))
-```
+  left_join(author_data, by = "DOI")
 
-Remove rows without funding information. **Note:** The number of rows should be the same as Author_Funding_Data or a little bit more.
-```{r}
+# Remove rows without funding info
 PLOS_Data <- PLOS_Data %>%
   filter(n_awards_NSERC > 0 | n_awards_CIHR > 0)
-```
-
-Check for multiple rows with the same DOI. This occurs when a single paper has multiple authors with associated funding information.
-```{r}
-WIP
 ```
 
 We will also remove rows corresponding to publications that predate an author’s earliest CIHR or NSERC award. This results in a dataset that includes only publications with at least one author who received CIHR or NSERC funding prior to publishing the scored work.
 ```{r}
-WIP
+PLOS_Data <- PLOS_Data %>%
+  filter(
+    (!is.na(oldest_year_NSERC) & Publication_Year >= oldest_year_NSERC) |
+    (!is.na(oldest_year_CIHR) & Publication_Year >= oldest_year_CIHR)
+  )
 ```
 
-Save data.
+Saving data.
 ```{r}
 write_csv(PLOS_Data, file = here("data/clean-data/Cleaned_Master-Data.csv"))
 ```
