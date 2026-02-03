@@ -1,0 +1,131 @@
+---
+title: "03_Preliminary_Analysis"
+author: "Jordan Katchen"
+date: "2026-02-02"
+output: html_document
+---
+
+# Introduction
+
+This file documents the preliminary exploration of our dataset, conducted before pre-registration. No exploratory analysis was performed that is not recorded here. Therefore, this file provides important context for further analyses.
+
+# Preparations
+
+Loading library:
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(here)
+```
+
+Loading data:
+```{r}
+Plos_Data <- read_csv(here("data", "clean-data", "Cleaned_Master_Data.csv"), guess_max = 4500)
+```
+
+# Exploration
+
+## Publications per Author
+
+This visualization shows how many authors have 1, 2, 3, etc. publications in the dataset. Most authors unsurprisingly only one publication.
+```{r}
+Plos_Data %>%
+  count(combined_id, name = "n_rows") %>%  # Count publications per author
+  count(n_rows) %>%  # Count how many authors have each publication count
+  ggplot(aes(x = n_rows, y = n)) +
+  geom_col(fill = "skyblue", color = "black") +
+  geom_text(aes(label = n), vjust = -0.3) +  # Add count labels on bars
+  labs(
+    x = "Number of Publications",
+    y = "Author Count",
+    title = "Distribution of Publications per Author"
+  ) +
+  theme_minimal()
+```
+
+## Awards Distribution
+
+Next, we'll create a summary dataset that we'll use across multiple visualizations. This consolidates our funding data and replaces missing values with zeros.
+```{r}
+funding_summary <- Plos_Data %>%
+  select(combined_id, starts_with("n_awards_"), starts_with("total_amount_")) %>%
+  distinct() %>%  # Get unique author records
+  mutate(across(everything(), ~replace_na(., 0))) %>%  # Replace all NAs with 0
+  mutate(
+    total_awards = n_awards_NSERC + n_awards_CIHR,
+    total_funding = total_amount_NSERC + total_amount_CIHR
+  )
+```
+
+This plot examines the total number of awards (combining both NSERC and CIHR) that each author has received.
+```{r}
+funding_summary %>%
+  count(total_awards) %>%  # Count authors with each total_awards value
+  ggplot(aes(x = total_awards, y = n)) +
+  geom_col(fill = "skyblue", color = "black") +
+  geom_text(aes(label = n), vjust = -0.3) +
+  labs(
+    x = "Number of Awards",
+    y = "Author Count",
+    title = "Distribution of Awards per Author"
+  ) +
+  theme_minimal()
+```
+
+## Relationship Between Awards and Funding
+
+These scatter plots explore whether more awards correlate with higher total funding amounts.
+
+### NSERC Funding
+```{r}
+funding_summary %>%
+  ggplot(aes(x = n_awards_NSERC, y = total_amount_NSERC)) +
+  geom_jitter(colour = "black", size = 1, shape = 1, width = 0.1) +
+  labs(
+    x = "Number of NSERC Awards",
+    y = "Total NSERC Funding ($)",
+    title = "NSERC: Awards vs. Total Funding"
+  ) +
+  theme_minimal()
+```
+
+### CIHR Funding
+```{r}
+funding_summary %>%
+  ggplot(aes(x = n_awards_CIHR, y = total_amount_CIHR)) +
+  geom_jitter(colour = "black", size = 1, shape = 1, width = 0.1) +
+  scale_x_continuous(breaks = scales::breaks_pretty()) +
+  labs(
+    x = "Number of CIHR Awards",
+    y = "Total CIHR Funding ($)",
+    title = "CIHR: Awards vs. Total Funding"
+  ) +
+  theme_minimal()
+```
+
+### Combined Agency Comparison
+
+This plot overlays both NSERC and CIHR data to compare patterns between the two funding agencies.
+````{r}
+funding_summary %>%
+  tidyr::pivot_longer(
+    cols = -combined_id,
+    names_to = c(".value", "agency"),
+    names_pattern = "(.+)_(NSERC|CIHR)"
+  ) %>%
+  filter(n_awards > 0) %>%  # Remove rows with no awards
+  ggplot(aes(x = n_awards, y = total_amount, color = agency)) +
+  geom_jitter(size = 1, shape = 1, width = 0.1) +
+  scale_color_manual(
+    values = c("NSERC" = "#E69F00", "CIHR" = "#56B4E9"),
+    labels = c("CIHR", "NSERC")
+  ) +
+  labs(
+    x = "Number of Awards",
+    y = "Total Award Amount ($)",
+    color = "Funding Agency",
+    title = "Comparison of Awards vs. Funding Amounts by Agency"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+````

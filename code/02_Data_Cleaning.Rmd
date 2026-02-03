@@ -38,8 +38,8 @@ Data can be found: https://drive.google.com/drive/folders/1FSxIsOkGuVqUTiFzEPaC4
 files <- list(
   list(id = "https://drive.google.com/file/d/1JPSHpU8EMPeviTDvPFmbX4Nua6gcUcd4/view?usp=sharing", path = here("data", "raw-data", "RAW_PLOS.csv")),
   list(id = "https://drive.google.com/file/d/1v9Ho0FVOsazANgoNBgFRqKMzxdUwiTwy/view?usp=sharing", path = here("data", "raw-data", "RAW_PLOS_Comparator.csv")),
-  list(id = "https://drive.google.com/file/d/1njKEhlUaej68Lf0ltiJJaJtRp6AVfoOh/view?usp=share_link", path = here("data", "raw-data", "RAW_NSERC.csv")),
-  list(id = "https://drive.google.com/file/d/1OV9Mkem4QvyYYZAHtP1IEHIRU7s2Sww9/view?usp=sharing", path = here("data", "raw-data", "RAW_CIHR.csv"))
+  list(id = "https://drive.google.com/file/d/1p9VTGlxzndML6PDjCJ_r4Ve4ku1RXVOV/view?usp=share_link", path = here("data", "raw-data", "RAW_NSERC.csv")),
+  list(id = "https://drive.google.com/file/d/15UPWi0FlDIoxv2KjB6zhQk3CRHrzUxXv/view?usp=share_link", path = here("data", "raw-data", "RAW_CIHR.csv"))
 )
 
 # Use deauth() so public files can be downloaded without logging in
@@ -338,5 +338,5 @@ PLOS_Data <- PLOS_Data %>%
 
 Saving data.
 ```{r}
-write_csv(PLOS_Data, file = here("data/clean-data/Cleaned_Master-Data.csv"))
+write_csv(PLOS_Data, file = here("data/clean-data/Cleaned_Master_Data.csv"))
 ```
