@@ -134,6 +134,12 @@ Read in saved intermediate data.
 OA_PLOS_Data <- read_csv(here("data/intermediate-data/OA_PLOS_Hold.csv"), guess_max = 6000)
 ```
 
+Filter to keep only corresponding authors
+```{r}
+OA_PLOS_Data <- OA_PLOS_Data %>%
+  filter(is_corresponding == TRUE)
+```
+
 Clean intermediary objects from the environment.
 ```{r}
 rm(PLOS_Comparator, PLOS_Main, cols_to_clean)
