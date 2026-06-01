@@ -1,10 +1,13 @@
 ---
-title: "02_Data_Cleaning"
+title: "02_Data_Cleaning_TestV2"
 author: "Jordan Katchen"
-date: "2026-01-23"
+date: "2026-03-08"
 output: html_document
 ---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
 
 # Introduction
 
@@ -12,6 +15,7 @@ This file cleans and merges the raw PLOS data, CIHR funding data, and NSERC fund
 
 # Library
 
+Loading required packages.
 ```{r}
 library(tidyverse)
 library(rcrossref)
@@ -76,21 +80,50 @@ PLOS_Comparator <- mutate(PLOS_Comparator, source = "Comparator")
 PLOS_Data <- bind_rows(PLOS_Main, PLOS_Comparator)
 ```
 
-Because we are only interested in Canadian research, remove all rows without a Canadian corresponding author or first author.
+Because we are only interested in Canadian research, remove all rows without a Canadian corresponding author.
 ```{r}
 PLOS_Data <- PLOS_Data %>%
-  filter(Corresponding_Author_Country == "Canada" | First_Author_Country == "Canada")
+  filter(Corresponding_Author_Country == "Canada")
 ```
 
 Fetch Open Alex metadata using study DOIs.
-```{r}
+```{r, eval=FALSE}
+# Pull everything from OpenAlex
 OA_PLOS_Data <- oa_fetch(doi = PLOS_Data$DOI)
+
+# Pull funder info from Crossref
+funder_df <- PLOS_Data$DOI |>
+  cr_works() |>
+  pluck("data") |>
+  select(doi, funder) |>
+  unnest(funder) |>
+  select(doi,
+         funder_name  = name,
+         funder_doi   = DOI,
+         funder_award = award) |>
+  group_by(doi) |>
+  nest(funders = c(funder_name, funder_doi, funder_award))
+
+# Join by DOI
+OA_PLOS_Data <- oa_fetch(doi = PLOS_Data$DOI) |>
+  mutate(doi_clean = str_remove(doi, "https://doi.org/")) |>
+  left_join(funder_df, by = c("doi_clean" = "doi")) |>
+  select(-doi_clean)
+```
+
+Because the Open Alex search can take a few hours, lets save the output to the intermediate-data directory.
+```{r}
+# Saving data
+# saveRDS(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.rds"))
+
+# Reading data
+OA_PLOS_Data <- readRDS(here("data/intermediate-data/OA_PLOS_Hold.rds"))
 ```
 
 Isolate author and institution information from Open Alex search. This results in having a single row for each publication, author, institution combination.
 ```{r}
 OA_PLOS_Data <- OA_PLOS_Data %>%
-  select(doi, authorships) %>%
+  select(doi, authorships, publication_year, funders) %>%
   unnest(authorships) %>%
   rename(author_id = id, author_display_name = display_name) %>%
   unnest(affiliations) %>%
@@ -122,16 +155,6 @@ cols_to_clean <- c("institution_display_name", "first_name", "last_name")
 OA_PLOS_Data <- OA_PLOS_Data %>%
   mutate(across(all_of(cols_to_clean), standardize_text)) %>%
   mutate(combined_id = paste(first_name, last_name, institution_display_name, sep = "_"))
-```
-
-Save data to the intermediate-data directory.
-```{r}
-# write_csv(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.csv"))
-```
-
-Read in saved intermediate data.
-```{r}
-OA_PLOS_Data <- read_csv(here("data/intermediate-data/OA_PLOS_Hold.csv"), guess_max = 6000)
 ```
 
 Clean intermediary objects from the environment.
@@ -210,21 +233,6 @@ nserc_data <- nserc_data %>%
   mutate(combined_id = paste(first_name, last_name, Institution, sep = "_"))
 ```
 
-Summarize the funding information for every author.
-```{r}
-# Summaries for authors using firstname, lastname, and institution information
-nserc_summary <- nserc_data %>%
-  group_by(combined_id) %>%
-  summarise(
-    n_awards_NSERC = n(),
-    total_amount_NSERC = sum(`AwardAmount`, na.rm = TRUE),
-    oldest_year_NSERC = min(`FiscalYear`, na.rm = TRUE),
-    newest_year_NSERC = max(`FiscalYear`, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(total_amount_NSERC))
-```
-
 # CIHR Data Cleaning
 
 Load the CIHR funding data.
@@ -278,65 +286,116 @@ cihr_data <- cihr_data %>%
   mutate(combined_id = paste(first_name, last_name, Institution_Paid, sep = "_"))
 ```
 
-Summarize the CIHR funding information for every author.
+# Final Data Wrangling
+
+## Clean the Data
+ 
+Standardize column names and types across all three datasets.
+ 
 ```{r}
-# Summaries for clean (non-conflict) authors using first and last name
-cihr_summary <- cihr_data %>%
-  group_by(combined_id) %>%
-  summarise(
-    n_awards_CIHR = n(),
-    total_amount_CIHR = sum(CIHR_Contribution, na.rm = TRUE),
-    oldest_year_CIHR = min(Year, na.rm = TRUE),
-    newest_year_CIHR = max(Year, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  arrange(desc(total_amount_CIHR))
+publications <- OA_PLOS_Data |>
+  mutate(doi = sub("^https://doi.org/", "", doi)) |>
+  rename(DOI = doi) |>
+  select(DOI, combined_id, author_position, is_corresponding, publication_year, funders)
+ 
+nserc_grants <- nserc_data |>
+  select(combined_id, FiscalYear, AwardAmount) |>
+  mutate(FiscalYear = as.integer(FiscalYear))
+ 
+cihr_grants <- cihr_data |>
+  select(combined_id, Year, CIHR_Contribution) |>
+  mutate(Year = as.integer(Year))
 ```
-
-# Combining Data 
-
-Combine all the author data together by the `combined_id` variable.
+ 
+---
+ 
+## Summarise Grants
+ 
+### Publication-level: largest grant within a 5-year lookback window
+ 
+For each publication, find grants awarded to the same author within 4 years before publication, then keep only the largest.
+ 
 ```{r}
-# Removing unnecessary columns
-OA_PLOS_Data <- OA_PLOS_Data %>%
-  select(doi, combined_id)
-
-# Joining data
-author_data <- OA_PLOS_Data %>%
-  left_join(nserc_summary, by = "combined_id") %>%
-  left_join(cihr_summary, by = "combined_id")
-
-# Remove rows without funding info
-author_data <- author_data %>%
-  filter(n_awards_NSERC > 0 | n_awards_CIHR > 0)
+nserc_pub_matches <- publications |>
+  mutate(year_minus_4 = publication_year - 4) |>
+  left_join(
+    nserc_grants,
+    join_by(combined_id, y$FiscalYear <= x$publication_year, y$FiscalYear >= x$year_minus_4)
+  ) |>
+  select(-year_minus_4) |>
+  filter(AwardAmount > 0) |>
+  rename(nserc_top_year_5yr = FiscalYear, nserc_top_award_5yr = AwardAmount) |>
+  group_by(DOI, combined_id) |>
+  slice_max(nserc_top_award_5yr, n = 1, na_rm = TRUE, with_ties = FALSE) |>
+  ungroup() |>
+  select(DOI, combined_id, nserc_top_year_5yr, nserc_top_award_5yr)
+ 
+cihr_pub_matches <- publications |>
+  mutate(year_minus_4 = publication_year - 4) |>
+  left_join(
+    cihr_grants,
+    join_by(combined_id, y$Year <= x$publication_year, y$Year >= x$year_minus_4)
+  ) |>
+  select(-year_minus_4) |>
+  filter(CIHR_Contribution > 0) |>
+  rename(cihr_top_year_5yr = Year, cihr_top_award_5yr = CIHR_Contribution) |>
+  group_by(DOI, combined_id) |>
+  slice_max(cihr_top_award_5yr, n = 1, na_rm = TRUE, with_ties = FALSE) |>
+  ungroup() |>
+  select(DOI, combined_id, cihr_top_year_5yr, cihr_top_award_5yr)
 ```
-
-Adding author data to PLOS data.
+ 
+### Author-level: largest grant ever received
+ 
+For each author, find their single largest award from each funding source and count their total number of awards. A `full_join` gives every author a single row with columns for both funding sources. Authors with only one source will have `NA` in the other source's columns.
+ 
 ```{r}
-# Removing http info from the author doi column
-author_data <- author_data %>%
-  mutate(doi = sub("^https://doi.org/", "", doi))  %>%
-  rename(DOI = doi)
-
-# Joining data
-PLOS_Data <- PLOS_Data %>%
-  left_join(author_data, by = "DOI")
-
-# Remove rows without funding info
-PLOS_Data <- PLOS_Data %>%
-  filter(n_awards_NSERC > 0 | n_awards_CIHR > 0)
+author_funding <- full_join(
+  nserc_grants |>
+    group_by(combined_id) |>
+    summarise(
+      nserc_top_year_all  = FiscalYear[which.max(AwardAmount)],
+      n_awards_nserc      = n(),
+      nserc_top_award_all = max(AwardAmount)
+    ),
+  cihr_grants |>
+    group_by(combined_id) |>
+    summarise(
+      cihr_top_year_all  = Year[which.max(CIHR_Contribution)],
+      n_awards_cihr      = n(),
+      cihr_top_award_all = max(CIHR_Contribution)
+    ),
+  by = "combined_id"
+)
 ```
-
-We will also remove rows corresponding to publications that predate an author’s earliest CIHR or NSERC award. This results in a dataset that includes only publications with at least one author who received CIHR or NSERC funding prior to publishing the scored work.
+ 
+---
+ 
+## Build Final Dataset
+ 
+Join everything onto the main PLOS dataset in a single pipeline. Each join adds a distinct set of columns, giving one row per DOI + author with no duplication.
+ 
 ```{r}
-PLOS_Data <- PLOS_Data %>%
-  filter(
-    (!is.na(oldest_year_NSERC) & Publication_Year >= oldest_year_NSERC) |
-    (!is.na(oldest_year_CIHR) & Publication_Year >= oldest_year_CIHR)
-  )
+PLOS_Data_Full <- PLOS_Data |>
+  left_join(publications, by = "DOI") |>
+  # Publication-level: largest grant within 5-year lookback window
+  left_join(nserc_pub_matches, by = c("DOI", "combined_id")) |>
+  left_join(cihr_pub_matches,  by = c("DOI", "combined_id")) |>
+  # Author-level: largest grant the author ever received
+  left_join(author_funding, by = "combined_id")
 ```
+ 
+The final object has one row per **DOI + author** with four distinct award columns:
+ 
+| Column | Meaning |
+|---|---|
+| `nserc_top_award_5yr` | Largest NSERC grant within the 5-year lookback window |
+| `cihr_top_award_5yr` | Largest CIHR grant within the 5-year lookback window |
+| `nserc_top_award_all` | Largest NSERC grant the author has ever received |
+| `cihr_top_award_all` | Largest CIHR grant the author has ever received |
 
-Saving data.
+Saving the final master dataset.
+
 ```{r}
-# write_csv(PLOS_Data, file = here("data/clean-data/Cleaned_Master_Data.csv"))
+saveRDS(PLOS_Data_Full, file = here("data", "clean-data", "Cleaned_Master_Data.rds"))
 ```

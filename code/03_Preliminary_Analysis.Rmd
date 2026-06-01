@@ -9,6 +9,10 @@ output: html_document
 
 This file documents the preliminary exploration of our dataset, conducted before pre-registration. No exploratory analysis was performed that is not recorded here. Therefore, this file provides important context for further analyses.
 
+# Thoughts
+
+- Might want to start by filter to only corresponding authors. But, the issue with this is that this column is not super reliable... Might just have to rely on the fact that if an authors received a discovery or project grant that the researcher is senior enough that they should be pushing for sharing on all of there papers.
+
 # Preparations
 
 Loading library:
@@ -20,10 +24,206 @@ library(here)
 
 Loading data:
 ```{r}
-Plos_Data <- read_csv(here("data", "clean-data", "Cleaned_Master_Data.csv"), guess_max = 4500)
+PLOS_Data_Full <- readRDS(here("data", "clean-data", "Cleaned_Master_Data.rds"))
+```
+
+Sub-setting the master dataset into two separate datasets specific to my diffrent questions.
+```{r}
+# ~~ 1. DOI-level dataset ~~
+# One row per DOI, keeping the largest NSERC and CIHR award across all authors
+doi_data <- PLOS_Data_Full |>
+  group_by(DOI) |>
+  summarise(
+    # Keep publication-level columns (same for all rows within a DOI)
+    across(c(Publication_Day, Publication_Month, Publication_Year,
+             Primary_Topic_Field, Primary_Topic_Subfield,
+             Corresponding_Author_Country, First_Author_Country,
+             Data_Generated, Data_Shared, Data_Location,
+             Code_Generated, Code_Shared, Code_Location,
+             Quarter, source), first),
+    # Largest NSERC award across all authors on this DOI
+    nserc_top_award_5yr = max(nserc_top_award_5yr, na.rm = TRUE),
+    nserc_top_year_5yr  = nserc_top_year_5yr[which.max(nserc_top_award_5yr)],
+    # Largest CIHR award across all authors on this DOI
+    cihr_top_award_5yr  = max(cihr_top_award_5yr, na.rm = TRUE),
+    cihr_top_year_5yr   = cihr_top_year_5yr[which.max(cihr_top_award_5yr)]
+  ) |>
+  # max() returns -Inf for all-NA groups, convert back to NA
+  mutate(
+    nserc_top_award_5yr = na_if(nserc_top_award_5yr, -Inf),
+    cihr_top_award_5yr  = na_if(cihr_top_award_5yr,  -Inf)
+  ) |>
+  ungroup()
+
+# ~~ 2. Author-level dataset ~~
+# One row per author, summarising data and code sharing across all publications
+author_data <- PLOS_Data_Full |>
+  group_by(combined_id) |>
+  summarise(
+    n_publications = n_distinct(DOI),
+    # Data sharing
+    n_data_generated = sum(Data_Generated == TRUE, na.rm = TRUE),
+    n_data_shared = sum(Data_Shared == TRUE,    na.rm = TRUE),
+    n_data_linked = sum(str_detect(Data_Location, regex("online", ignore_case = TRUE)), na.rm = TRUE),
+    data_locations = paste(sort(unique(na.omit(Data_Location))), collapse = "; "),
+    # Code sharing
+    n_code_generated = sum(Code_Generated == TRUE, na.rm = TRUE),
+    n_code_shared = sum(Code_Shared == TRUE,    na.rm = TRUE),
+    code_locations = paste(sort(unique(na.omit(Code_Location))), collapse = "; "),
+    # Funding info
+    nserc_top_award_all = first(nserc_top_award_all),
+    nserc_top_year_all = first(nserc_top_year_all),
+    n_awards_nserc = first(n_awards_nserc),
+    cihr_top_award_all = first(cihr_top_award_all),
+    cihr_top_year_all = first(cihr_top_year_all),
+    n_awards_cihr = first(n_awards_cihr)
+  ) |>
+  ungroup()
 ```
 
 # Exploration
+
+```{r}
+# Classify each DOI by both matched grants and CrossRef funders
+funding_comparison <- PLOS_Data_Full |>
+  group_by(DOI) |>
+  summarise(
+    # From matched grant data
+    has_nserc_matched  = any(!is.na(nserc_top_award_5yr)),
+    has_cihr_matched   = any(!is.na(cihr_top_award_5yr)),
+    # From CrossRef funders string
+    has_nserc_crossref = any(str_detect(funders, regex("nserc|natural sciences and engineering|10\\.13039/501100000015", ignore_case = TRUE)), na.rm = TRUE),
+    has_cihr_crossref  = any(str_detect(funders, regex("cihr|canadian institutes of health research|10\\.13039/501100000024", ignore_case = TRUE)), na.rm = TRUE)
+  ) |>
+  mutate(
+    funding_matched = case_when(
+      has_nserc_matched & has_cihr_matched ~ "NSERC & CIHR",
+      has_nserc_matched                   ~ "NSERC only",
+      has_cihr_matched                    ~ "CIHR only",
+      TRUE                                ~ "No funding info"
+    ) |> factor(levels = c("NSERC & CIHR", "NSERC only", "CIHR only", "No funding info")),
+    funding_crossref = case_when(
+      has_nserc_crossref & has_cihr_crossref ~ "NSERC & CIHR",
+      has_nserc_crossref                    ~ "NSERC only",
+      has_cihr_crossref                     ~ "CIHR only",
+      TRUE                                  ~ "No funding info"
+    ) |> factor(levels = c("NSERC & CIHR", "NSERC only", "CIHR only", "No funding info")),
+    # Agreement: both sources agree on NSERC, CIHR, or both
+    funding_agreement = case_when(
+      (has_nserc_matched & has_cihr_matched) & (has_nserc_crossref & has_cihr_crossref) ~ "NSERC & CIHR",
+      has_nserc_matched & has_nserc_crossref & !has_cihr_matched & !has_cihr_crossref   ~ "NSERC only",
+      has_cihr_matched  & has_cihr_crossref  & !has_nserc_matched & !has_nserc_crossref ~ "CIHR only",
+      TRUE                                                                               ~ "No funding info"
+    ) |> factor(levels = c("NSERC & CIHR", "NSERC only", "CIHR only", "No funding info"))
+  )
+
+# Plot side by side
+funding_comparison |>
+  pivot_longer(
+    cols      = c(funding_matched, funding_crossref, funding_agreement),
+    names_to  = "source",
+    values_to = "funding_status"
+  ) |>
+  mutate(source = recode(source,
+    funding_matched   = "Matched Grants",
+    funding_crossref  = "CrossRef Funders",
+    funding_agreement = "Agreement"
+  ) |> factor(levels = c("Matched Grants", "CrossRef Funders", "Agreement"))) |>
+  count(source, funding_status) |>
+  group_by(source) |>
+  mutate(prop = n / sum(n)) |>
+  ggplot(aes(x = source, y = prop, fill = funding_status)) +
+  geom_col() +
+  geom_text(aes(label = paste0(n, "\n(", scales::percent(prop, accuracy = 0.1), ")")),
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_manual(values = c(
+    "NSERC & CIHR"    = "#2166ac",
+    "NSERC only"      = "#4dac26",
+    "CIHR only"       = "#d01c8b",
+    "No funding info" = "#b8b8b8"
+  )) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Funding Coverage: Matched Grants vs. CrossRef Funders vs. Agreement",
+    x     = NULL,
+    y     = "Share of Publications",
+    fill  = NULL
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major.x = element_blank())
+```
+
+```{r}
+author_data |>
+  filter(!is.na(nserc_top_award_all) | !is.na(cihr_top_award_all)) |>
+  count(n_publications) |>
+  ggplot(aes(x = n_publications, y = n)) +
+  geom_col(fill = "#2166ac") +
+  geom_text(aes(label = n), vjust = -0.5, size = 3) +
+  labs(
+    title = "Publications per Funded Author",
+    x     = "Number of Publications",
+    y     = "Number of Authors"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Classify each author by funding status
+author_funding_status <- PLOS_Data_Full |>
+  group_by(combined_id) |>
+  summarise(
+    n_publications     = n_distinct(DOI),
+    has_nserc          = any(!is.na(nserc_top_award_all)),
+    has_cihr           = any(!is.na(cihr_top_award_all))
+  ) |>
+  mutate(
+    funding_status = case_when(
+      has_nserc & has_cihr ~ "NSERC & CIHR",
+      has_nserc            ~ "NSERC only",
+      has_cihr             ~ "CIHR only",
+      TRUE                 ~ "No funding info"
+) |> factor(levels = c("NSERC & CIHR", "NSERC only", "CIHR only", "No funding info"))
+  )
+
+# Panel 1: number of authors per funding status
+author_funding_status |>
+  count(funding_status) |>
+  ggplot(aes(x = funding_status, y = n, fill = funding_status)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.5) +
+  scale_fill_manual(values = c(
+    "NSERC & CIHR"   = "#2166ac",
+    "NSERC only"     = "#4dac26",
+    "CIHR only"      = "#d01c8b",
+    "No funding info" = "#b8b8b8"
+  )) +
+  labs(
+    title = "Authors by Funding Source",
+    x     = NULL,
+    y     = "Number of Authors"
+  ) +
+  theme_minimal()
+
+# Panel 2: publication counts per author, by funding status
+author_funding_status |>
+  ggplot(aes(x = n_publications, fill = funding_status)) +
+  geom_histogram(binwidth = 1, colour = "white") +
+  scale_fill_manual(values = c(
+    "NSERC & CIHR"    = "#2166ac",
+    "NSERC only"      = "#4dac26",
+    "CIHR only"       = "#d01c8b",
+    "No funding info" = "#b8b8b8"
+  )) +
+  facet_wrap(~ funding_status, scales = "free_y") +
+  labs(
+    title = "Publications per Author by Funding Status",
+    x     = "Number of Publications",
+    y     = "Number of Authors"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
 
 ## Publications per Author
 

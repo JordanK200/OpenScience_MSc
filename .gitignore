@@ -11,6 +11,9 @@ data/**
 # Ignore WIP directory
 /WIP
 
+# Ignore archive directory
+/archive
+
 # MacOS
 .DS_Store
 
