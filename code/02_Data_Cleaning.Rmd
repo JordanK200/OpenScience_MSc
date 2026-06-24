@@ -1,22 +1,23 @@
 ---
-title: "02_Data_Cleaning_TestV2"
+title: "02_Data_Cleaning"
 author: "Jordan Katchen"
 date: "2026-03-08"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
 # Introduction
 
-This file cleans and merges the raw PLOS data, CIHR funding data, and NSERC funding data.
+This file cleans and merges the raw PLOS publication data and NSERC funding data in preparation for analysis. The pipeline covers five main stages:
+
+1. **Data Download**: raw files are fetched from Google Drive if not already present locally.
+2. **PLOS Data Cleaning**: the main and comparator publication datasets are combined, filtered to Canadian corresponding authors, enriched with Open Alex and Crossref metadata, and standardized for joining.
+3. **NSERC Data Cleaning**: the NSERC grants dataset is cleaned, name fields are parsed, grant instalments are collapsed into a single representative annual amount per grant, and award amounts are standardized into z-scores within committee by fiscal year groups.
+4. **Author Identity Review**: cases where the same author generated more than one `combined_id` within a single source are resolved automatically, by preferring whichever variant already matches the other dataset, or by recency when more than one variant matches. Every resolution is logged for review.
+5. **Final Data Wrangling**: cleaned datasets are summarized and joined into a single analysis-ready master file.
 
 # Library
 
-Loading required packages.
-```{r}
+```{r, message = FALSE, warning = FALSE}
 library(tidyverse)
 library(rcrossref)
 library(readxl)
@@ -26,30 +27,38 @@ library(stringi)
 library(googledrive)
 library(here)
 library(openalexR)
+library(stringdist)
 ```
 
 # Data Download
 
-For now, I've uploaded the raw data to a public Google drive. The following code chunk first checks to see if these raw files have already been downloaded locally, and if not, it downloads them from the Google drive to data/raw-data directory.
+Raw data files are stored in a public Google Drive folder. The code below checks whether each file already exists locally before downloading, so repeated runs do not re-fetch files unnecessarily.
 
-The NSERC and CIHR raw data can also be easily downloaded using the `01_CIHR_scrape.R` and `01_NSERC_scrape.R` scripts.
+Raw NSERC data can also be downloaded independently using the `01_NSERC_scrape.R` script.
 
-Data can be found: https://drive.google.com/drive/folders/1FSxIsOkGuVqUTiFzEPaC4xpr_r5OvzNJ?usp=sharing
+Data folder: https://drive.google.com/drive/folders/1FSxIsOkGuVqUTiFzEPaC4xpr_r5OvzNJ?usp=sharing
 
 ```{r}
-# --- Define Files ---
-# For each file: Google Drive ID and local path
+# Define each file as a list of its Google Drive URL and target local path
 files <- list(
-  list(id = "https://drive.google.com/file/d/1JPSHpU8EMPeviTDvPFmbX4Nua6gcUcd4/view?usp=sharing", path = here("data", "raw-data", "RAW_PLOS.csv")),
-  list(id = "https://drive.google.com/file/d/1v9Ho0FVOsazANgoNBgFRqKMzxdUwiTwy/view?usp=sharing", path = here("data", "raw-data", "RAW_PLOS_Comparator.csv")),
-  list(id = "https://drive.google.com/file/d/1p9VTGlxzndML6PDjCJ_r4Ve4ku1RXVOV/view?usp=share_link", path = here("data", "raw-data", "RAW_NSERC.csv")),
-  list(id = "https://drive.google.com/file/d/15UPWi0FlDIoxv2KjB6zhQk3CRHrzUxXv/view?usp=share_link", path = here("data", "raw-data", "RAW_CIHR.csv"))
+  list(
+    id   = "https://drive.google.com/file/d/1JPSHpU8EMPeviTDvPFmbX4Nua6gcUcd4/view?usp=sharing",
+    path = here("data", "raw-data", "RAW_PLOS.csv")
+  ),
+  list(
+    id   = "https://drive.google.com/file/d/1v9Ho0FVOsazANgoNBgFRqKMzxdUwiTwy/view?usp=sharing",
+    path = here("data", "raw-data", "RAW_PLOS_Comparator.csv")
+  ),
+  list(
+    id   = "https://drive.google.com/file/d/1p9VTGlxzndML6PDjCJ_r4Ve4ku1RXVOV/view?usp=share_link",
+    path = here("data", "raw-data", "RAW_NSERC.csv")
+  )
 )
 
-# Use deauth() so public files can be downloaded without logging in
+# Authenticate with deauth() so public files can be accessed without logging in
 drive_deauth()
 
-# Now download files
+# Download any files not already present locally
 walk(files, ~{
   if (!file.exists(.x$path)) {
     message("Downloading: ", .x$path)
@@ -59,262 +68,544 @@ walk(files, ~{
   }
 })
 
-rm(files) # Removing files list
+rm(files)
 ```
 
 # PLOS Data Cleaning
 
-Loading the main PLOS data and comparator data.
-```{r}
-PLOS_Main <- read.csv(here("data", "raw-data", "RAW_PLOS.csv"))
-PLOS_Comparator <- read.csv(here("data", "raw-data", "RAW_PLOS_Comparator.csv"))
-```
+Load the main PLOS dataset and the comparator dataset. A `source` column is added to each before combining so that every row retains its origin after the bind.
 
-Combining the main PLOS data with the PLOS comparator data.
 ```{r}
-# First add a new column to distinguish the data sets.
-PLOS_Main <- mutate(PLOS_Main, source = "PLOS")
+PLOS_Main       <- read.csv(here("data", "raw-data", "RAW_PLOS.csv"))
+PLOS_Comparator <- read.csv(here("data", "raw-data", "RAW_PLOS_Comparator.csv"))
+
+PLOS_Main       <- mutate(PLOS_Main,       source = "PLOS")
 PLOS_Comparator <- mutate(PLOS_Comparator, source = "Comparator")
 
-# Now combine data
 PLOS_Data <- bind_rows(PLOS_Main, PLOS_Comparator)
 ```
 
-Because we are only interested in Canadian research, remove all rows without a Canadian corresponding author.
+Because the study focuses on Canadian research, filter to rows where the corresponding author is based in Canada.
+
 ```{r}
-PLOS_Data <- PLOS_Data %>%
+PLOS_Data <- PLOS_Data |>
   filter(Corresponding_Author_Country == "Canada")
 ```
 
-Fetch Open Alex metadata using study DOIs.
-```{r, eval=FALSE}
-# Pull everything from OpenAlex
-OA_PLOS_Data <- oa_fetch(doi = PLOS_Data$DOI)
+Fetch funder information from Crossref and author metadata from Open Alex using the study DOIs. This step is set to `eval = FALSE` because the Open Alex query can take several hours on a large dataset; the result is saved to an intermediate file so it only needs to be run once.
 
-# Pull funder info from Crossref
+```{r, eval = FALSE}
+# Pull funder information from Crossref and nest it by DOI
 funder_df <- PLOS_Data$DOI |>
   cr_works() |>
   pluck("data") |>
   select(doi, funder) |>
   unnest(funder) |>
-  select(doi,
-         funder_name  = name,
-         funder_doi   = DOI,
-         funder_award = award) |>
+  select(
+    doi,
+    funder_name  = name,
+    funder_doi   = DOI,
+    funder_award = award
+  ) |>
   group_by(doi) |>
   nest(funders = c(funder_name, funder_doi, funder_award))
 
-# Join by DOI
+# Pull Open Alex metadata and join Crossref funder information
 OA_PLOS_Data <- oa_fetch(doi = PLOS_Data$DOI) |>
   mutate(doi_clean = str_remove(doi, "https://doi.org/")) |>
   left_join(funder_df, by = c("doi_clean" = "doi")) |>
   select(-doi_clean)
+
+# Save to intermediate file
+saveRDS(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.rds"))
 ```
 
-Because the Open Alex search can take a few hours, lets save the output to the intermediate-data directory.
-```{r}
-# Saving data
-# saveRDS(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.rds"))
+Load the saved intermediate file. This chunk always runs, regardless of whether the chunk above was re-run.
 
-# Reading data
+```{r}
 OA_PLOS_Data <- readRDS(here("data/intermediate-data/OA_PLOS_Hold.rds"))
 ```
 
-Isolate author and institution information from Open Alex search. This results in having a single row for each publication, author, institution combination.
+Unnest the `authorships` and `affiliations` list columns returned by Open Alex so that each row represents a unique publication-author-institution combination.
+
 ```{r}
-OA_PLOS_Data <- OA_PLOS_Data %>%
-  select(doi, authorships, publication_year, funders) %>%
-  unnest(authorships) %>%
-  rename(author_id = id, author_display_name = display_name) %>%
-  unnest(affiliations) %>%
+OA_PLOS_Data <- OA_PLOS_Data |>
+  select(doi, authorships, publication_year, funders) |>
+  unnest(authorships) |>
+  rename(author_id = id, author_display_name = display_name) |>
+  unnest(affiliations) |>
   rename(institution = id, institution_display_name = display_name)
 ```
 
-Use `parse_names()` to split author names into components. Using the `parse_names()` function allows us to have a consistent method of formatting author names across all data sets.
+Use `parse_names()` to split author display names into structured components (first name, last name, etc.). A consistent parsing approach is important because these components form the join keys used to link authors across datasets.
+
 ```{r}
 OA_PLOS_Data <- cbind(OA_PLOS_Data, parse_names(OA_PLOS_Data$author_display_name))
 ```
 
-Creating and applying a function that will clean and standardize important text columns. These columns will be used later for joining, so it is important to try and remove inconsistencies.
+Define a text standardization function and apply it to the columns used as join keys. The function converts accented characters to their ASCII equivalents, strips all remaining non-alphanumeric characters, lowercases, and trims whitespace. This reduces spurious mismatches caused by encoding differences or formatting inconsistencies.
+
+Because institution names are inconsistent across datasets due to name changes over time, English/French variants, and abbreviated forms, a lookup table is applied after standardization to map known variants to a single canonical form. After both steps, a `combined_id` key is constructed by concatenating first name, last name, and institution name.
+
 ```{r}
-# Create a standardizing function - removes all special characters
 standardize_text <- function(x) {
   x <- as.character(x)
-  
-  x %>%
-    stringi::stri_trans_general("Latin-ASCII") %>% # Remove special characters
-    stringr::str_replace_all("[^A-Za-z0-9]+", "") %>% # Remove aLL non-alphanumeric characters
-    tolower() %>% # Make text lowercase
-    trimws() # Remove trailing and leading white space
+  x |>
+    stringi::stri_trans_general("Latin-ASCII") |> # Convert accented chars to ASCII
+    stringr::str_replace_all("[^A-Za-z0-9]+", "") |> # Strip non-alphanumeric characters
+    tolower() |>
+    trimws()
 }
 
-# Select columns to standardize
+# Lookup table mapping known institution name variants to a single canonical form,
+# applied to both PLOS and NSERC after standardize_text() runs and before
+# combined_id is built. Covers five sources of inconsistency:
+#   (1) "the" prefix variants (e.g. "theuniversityofwinnipeg")
+#   (2) Shortened or renamed forms (e.g. "westernuniversity", "ontariotechuniversity")
+#   (3) English/French name variants (e.g. "universitedottawa")
+#   (4) Institutional renames over time (e.g. Ryerson to Toronto Metropolitan)
+#   (5) Affiliated hospitals, research institutes, and satellite campuses mapped
+#       to their parent university. Because NSERC grants are held at the university
+#       level, a researcher appearing in PLOS under a hospital or institute
+#       affiliation is assumed to hold their grant under the parent institution.
+institution_lookup <- c(
+  # the prefix variants
+  "theuniversityofbritishcolumbia"               = "universityofbritishcolumbia",
+  "theuniversityofwesternontario"                = "universityofwesternontario",
+  "theuniversityofwinnipeg"                      = "universityofwinnipeg",
+
+  # Shortened or renamed forms
+  "westernuniversity"                            = "universityofwesternontario",
+  "polytechniquemontreal"                        = "ecolepolytechniquedemontreal",
+  "laurentianuniversity"                         = "laurentianuniversityofsudbury",
+  "ontariotechuniversity"                        = "universityofontarioinstituteoftechnology",
+  "thekingsuniversity"                           = "thekingsuniversityedmonton",
+  "ottawauniversity"                             = "universityofottawa",
+
+  # English/French name variants
+  "universitedottawa"                            = "universityofottawa",
+  "universitelaurentienne"                       = "laurentianuniversityofsudbury",
+  "collegemilitaireroyalducanada"                = "royalmilitarycollegeofcanada",
+
+  # Institutional renames
+  "ryersonuniversity"                            = "torontometropolitanuniversity",
+  "mountroyalcollege"                            = "mountroyaluniversity",
+  "redeemeruniversity"                           = "redeemeruniversitycollege",
+  "thekingsuniversitycollege"                    = "thekingsuniversityedmonton",
+  "teleuniversite"                               = "teluq",
+  "universiteteluq"                              = "teluq",
+
+  # Incomplete names
+  "fraservalley"                                 = "universityofthefraservalley",
+  "quebecenoutaouais"                            = "universiteduquebecenoutaouais",
+
+  # University of Toronto affiliates
+  "universityhealthnetwork"                      = "universityoftoronto",
+  "sunnybrookresearchinstitute"                  = "universityoftoronto",
+  "torontorehabilitationinstitute"               = "universityoftoronto",
+  "womenscollegehospital"                        = "universityoftoronto",
+  "lunenfeldtanenbaumresearchinstitute"          = "universityoftoronto",
+  "krembilresearchinstitute"                     = "universityoftoronto",
+  "torontogeneralhospitalresearchinstitute"      = "universityoftoronto",
+
+  # University of Ottawa affiliates
+  "ottawahospitalresearchinstitute"              = "universityofottawa",
+  "uottawabrainandmindresearchinstitute"         = "universityofottawa",
+  "ottawainstituteofsystemsbiology"              = "universityofottawa",
+
+  # McGill University affiliates
+  "mcgilluniversityhealthcentre"                 = "mcgilluniversity",
+  "montrealneurologicalinstituteandhospital"     = "mcgilluniversity",
+  "douglasmentalhealthuniversityinstitute"       = "mcgilluniversity",
+  "mcgilluniversityandgenomequebecinnovationcentre" = "mcgilluniversity",
+
+  # Universite de Montreal affiliates
+  "centrehospitalierdeluniversitedemontreal"     = "universitedemontreal",
+  "montrealheartinstitute"                       = "universitedemontreal",
+  "instituteforresearchinimmunologyandcancer"    = "universitedemontreal",
+  "institutuniversitairedegeriatriedemontreal"   = "universitedemontreal",
+  "montrealclinicalresearchinstitute"            = "universitedemontreal",
+  "institutuniversitaireensantementaledemontreal" = "universitedemontreal",
+
+  # Universite Laval affiliates
+  "institutuniversitairedecardiologieetdepneumologiedequebec" = "universitelaval",
+  "institutuniversitaireensantementaledequebec"  = "universitelaval",
+  "centrehospitalierdeluniversitelaval"          = "universitelaval",
+
+  # McMaster University affiliates
+  "populationhealthresearchinstitute"            = "mcmasteruniversity",
+  "mcmasteruniversitymedicalcentre"              = "mcmasteruniversity",
+  "thrombosisandatherosclerosisresearchinstitute" = "mcmasteruniversity",
+
+  # University of Western Ontario affiliates
+  "lawsonhealthresearchinstitute"                = "universityofwesternontario",
+  "childrenshealthresearchinstitute"             = "universityofwesternontario",
+  "parkwoodinstitute"                            = "universityofwesternontario",
+
+  # University of British Columbia affiliates
+  "universityofbritishcolumbiaokanagancampus"    = "universityofbritishcolumbia",
+  "okanaganuniversitycollege"                    = "universityofbritishcolumbia",
+  "womenshealthresearchinstitute"                = "universityofbritishcolumbia",
+  "vancouvercoastalhealthresearchinstitute"      = "universityofbritishcolumbia",
+  "universityofbritishcolumbiahospital"          = "universityofbritishcolumbia",
+
+  # University of Alberta affiliates
+  "womenandchildrenshealthresearchinstitute"     = "universityofalberta",
+  "universityofalbertahospital"                  = "universityofalberta",
+
+  # University of Calgary affiliates
+  "hotchkissbraininstitute"                      = "universityofcalgary",
+  "obrieninstitute"                              = "universityofcalgary",
+  "libincardiovascularinstituteofalberta"        = "universityofcalgary",
+
+  # University of Manitoba affiliates
+  "childrenshospitalresearchinstituteofmanitoba" = "universityofmanitoba"
+)
+
 cols_to_clean <- c("institution_display_name", "first_name", "last_name")
 
-# Apply standardizing function and create combined variable
-OA_PLOS_Data <- OA_PLOS_Data %>%
-  mutate(across(all_of(cols_to_clean), standardize_text)) %>%
+OA_PLOS_Data <- OA_PLOS_Data |>
+  mutate(across(all_of(cols_to_clean), standardize_text)) |>
+  mutate(institution_display_name = recode(institution_display_name, !!!institution_lookup)) |>
   mutate(combined_id = paste(first_name, last_name, institution_display_name, sep = "_"))
+
+# institution_lookup and standardize_text are retained for use in the NSERC chunk below
+rm(PLOS_Comparator, PLOS_Main, cols_to_clean)
 ```
 
-Clean intermediary objects from the environment.
+A single author can appear under more than one institution on the same publication. Sometimes this is a genuine dual affiliation, such as a university appointment alongside an affiliated hospital or research institute; other times it reflects an inconsistently recorded affiliation in Open Alex. Either way, this generates more than one `combined_id` for what is the same person. These cases are flagged here, to be resolved automatically in the Author Identity Review section below.
+
 ```{r}
-rm(PLOS_Comparator, PLOS_Main, cols_to_clean)
+plos_id_links <- OA_PLOS_Data |>
+  distinct(doi, first_name, last_name, combined_id) |>
+  group_by(doi, first_name, last_name) |>
+  filter(n_distinct(combined_id) > 1) |>
+  ungroup() |>
+  transmute(
+    combined_id,
+    source_type  = "PLOS",
+    # source_id identifies one specific author on one specific publication
+    # (doi + first_name + last_name), since a paper can have many authors and
+    # later steps need to evaluate each author's set of variants on its own,
+    # for example when checking whether a given author has exactly one NSERC
+    # match.
+    source_id    = paste(doi, first_name, last_name, sep = "_"),
+    match_reason = "same name, same publication, different institution"
+  )
 ```
 
 # NSERC Data Cleaning
 
-Load the NSERC funding data.
+Load the NSERC funding data, reading all columns as character strings initially to prevent type-parsing errors on import.
+
 ```{r}
 nserc_data <- readr::read_csv(
   here("data/raw-data/RAW_NSERC.csv"),
   col_types = readr::cols(.default = "c")
-)    
+)
 ```
 
-Fixing encoding issues. Attempts to convert only problematic character values from latin1 to UTF-8, while leaving already-valid UTF-8 values unchanged.
+The raw NSERC file can contain a mix of latin1- and UTF-8-encoded strings. The function below inspects each element's encoding and re-encodes only those that are not valid UTF-8, leaving already-valid values unchanged to avoid corrupting them. If a conversion fails, the original value is retained as a fallback.
+
 ```{r}
 code_fix <- function(x) {
-  
-  # Only operate on character vectors
   if (!is.character(x)) return(x)
 
-  # Check whether each element is valid UTF-8 (TRUE / FALSE / NA)
-  ok <- stringi::stri_enc_isutf8(x)
-
-  # Treat invalid or unknown encodings as needing conversion
+  ok  <- stringi::stri_enc_isutf8(x)
   bad <- is.na(ok) | !ok
 
-  # Fast exit if nothing needs fixing
   if (!any(bad)) return(x)
 
-  # Convert only problematic elements
-  y <- x
+  y      <- x
   y[bad] <- iconv(x[bad], from = "latin1", to = "UTF-8")
-
-  # If conversion fails, keep original value
-  y[is.na(y)] <- x[is.na(y)]
-
+  y[is.na(y)] <- x[is.na(y)]  # Fall back to original if conversion fails
   y
 }
 
-# Apply the function
-nserc_data <- nserc_data %>%
-  dplyr::mutate(dplyr::across(everything(), code_fix))
+nserc_data <- nserc_data |>
+  mutate(across(everything(), code_fix))
 ```
 
-Convert `FiscalYear` and `AwardAmount` to numeric.
+Now that encoding is resolved, convert `FiscalYear`, `CompetitionYear`, and `AwardAmount` to numeric types.
+
 ```{r}
-nserc_data <- nserc_data %>%
-  mutate(FiscalYear = as.numeric(FiscalYear),
-         AwardAmount = as.numeric(AwardAmount))
+nserc_data <- nserc_data |>
+  mutate(
+    FiscalYear      = as.numeric(FiscalYear),
+    CompetitionYear = as.numeric(CompetitionYear),
+    AwardAmount     = as.numeric(AwardAmount)
+  )
 ```
 
-Use `parse_names()` to split recipient names into components.
+NSERC stores recipient names in "Last, First" format. `format_reverse()` converts them to "First Last" so that `parse_names()` can split them into structured components, consistent with how author names are handled in the PLOS dataset.
+
 ```{r}
-# Using format_reverse to prepare names for the parse_names function
 nserc_data$`Name-Nom` <- humaniformat::format_reverse(nserc_data$`Name-Nom`)
 
-# Splitting names into components
 nserc_data <- cbind(nserc_data, parse_names(nserc_data$`Name-Nom`))
 
-# Removing original name column
-nserc_data <- select(nserc_data, -`Name-Nom`)
+nserc_data <- nserc_data |>
+  select(-`Name-Nom`)
 ```
 
-Use the function created above in the PLOS section to standardize important text columns.
-```{r}
-# Select columns to standardize
-cols_to_clean2 <- c("Institution", "first_name", "last_name")
+Apply the same `standardize_text()` function, institution name lookup, and `combined_id` construction used for the PLOS data. Harmonizing institution names using the same lookup table on both sides ensures that join keys are directly comparable across datasets.
 
-# Apply standardizing function and create combined variable
-nserc_data <- nserc_data %>%
-  mutate(across(all_of(cols_to_clean2), standardize_text)) %>%
+```{r}
+cols_to_clean <- c("Institution", "first_name", "last_name")
+
+nserc_data <- nserc_data |>
+  mutate(across(all_of(cols_to_clean), standardize_text)) |>
+  mutate(Institution = recode(Institution, !!!institution_lookup)) |> # Harmonize institution names
   mutate(combined_id = paste(first_name, last_name, Institution, sep = "_"))
+
+rm(cols_to_clean)
 ```
 
-# CIHR Data Cleaning
+NSERC grants are paid out in annual instalments, so a single grant (`ApplicationID`) currently spans multiple rows. Before the data can be summarized, two issues need to be resolved:
 
-Load the CIHR funding data.
+1. The same `ApplicationID` can be linked to more than one `combined_id`. This can happen because the recipient changed institutions partway through the grant, or because of small name-parsing inconsistencies (for example, "v_roullin" in one row and "vgaelle_roullin" in another). Rather than guessing which spelling is correct, every distinct `combined_id` linked to a grant is kept, and these cases are flagged here, to be resolved automatically in the Author Identity Review section below.
+2. A single grant can have several rows for other reasons too: separate instalment payments, split payments within the same year, and a small number of bundled or partial-year rows. These are collapsed into one representative annual amount per grant, by summing any split payments within each `FiscalYear` and then taking the most frequently occurring (**modal**) amount across years. The modal amount reflects the grant's typical annual value while staying robust to outlier rows, such as a bundled instalment or a partial final payment, without requiring any assumption about the grant's true duration.
+
 ```{r}
-cihr_data <- read_csv(here("data/raw-data/RAW_CIHR.csv"))
+# Every distinct combined_id linked to a grant, along with the name and
+# institution components behind it, so that later steps can tell which
+# component differs (name vs. institution) when a grant has more than one
+grant_name_components <- nserc_data |>
+  distinct(ApplicationID, combined_id, first_name, last_name, Institution)
+
+# Most recent FiscalYear each combined_id was linked to within a grant.
+# Captured here, before the instalment collapse below, since the collapsed
+# table no longer retains a per-year breakdown. Used later in the Author
+# Identity Review section to resolve ambiguous identity matches by recency.
+combined_id_recency <- nserc_data |>
+  group_by(ApplicationID, combined_id) |>
+  summarise(last_fiscal_year = max(FiscalYear, na.rm = TRUE), .groups = "drop")
+
+grant_combined_ids <- grant_name_components |>
+  distinct(ApplicationID, combined_id)
+
+# Flag grants linked to more than one combined_id, for identity resolution.
+# match_reason records which component(s) actually differ across the linked rows.
+nserc_id_links <- grant_name_components |>
+  group_by(ApplicationID) |>
+  filter(n_distinct(combined_id) > 1) |>
+  mutate(
+    match_reason = case_when(
+      n_distinct(Institution) > 1 & n_distinct(paste(first_name, last_name)) == 1 ~
+        "same ApplicationID, same name, different institution",
+      n_distinct(Institution) == 1 & n_distinct(paste(first_name, last_name)) > 1 ~
+        "same ApplicationID, same institution, different name",
+      TRUE ~
+        "same ApplicationID, different name and institution"
+    )
+  ) |>
+  ungroup() |>
+  transmute(
+    combined_id,
+    source_type = "NSERC",
+    source_id   = ApplicationID,
+    match_reason
+  )
+
+# Finds the most frequently occurring value in a vector, used below to find
+# each grant's representative annual amount
+get_mode <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0) return(NA_real_)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Step 1: sum split-payment rows that share the same ApplicationID and FiscalYear
+# Step 2: collapse each grant to a single representative annual amount, using
+# the modal AwardAmount across observed years
+nserc_grant_funding <- nserc_data |>
+  group_by(ApplicationID, FiscalYear) |>
+  summarise(
+    across(c(CommitteeNameEN, CompetitionYear), first),
+    AwardAmount = sum(AwardAmount, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  group_by(ApplicationID) |>
+  summarise(
+    CommitteeNameEN = first(CommitteeNameEN),
+    FiscalYear      = as.integer(first(CompetitionYear)),
+    AwardAmount     = get_mode(AwardAmount),
+    .groups = "drop"
+  )
+
+# Re-attach the grant's funding info to every combined_id it was ever linked to.
+# Grants with more than one combined_id appear as duplicate rows with identical
+# funding info, one row per combined_id, so the publication join downstream can
+# match on whichever spelling the author used at the time.
+nserc_data <- grant_combined_ids |>
+  left_join(nserc_grant_funding, by = "ApplicationID")
 ```
 
-Using the code_fix function created earlier to convert only problematic character values from latin1 to UTF-8, while leaving already-valid UTF-8 values unchanged.
+To compare award amounts across committees and fiscal years, `AwardAmount` is standardized into z-scores within each `CommitteeNameEN` by `FiscalYear` group. The group-level means and standard deviations are computed from `nserc_grant_funding`, which has exactly one row per grant, so that every grant contributes to the statistics exactly once even though it may be linked to more than one `combined_id`. The result is retained as a separate object, `group_year_stats`, for review, then joined back onto `nserc_data` to derive `nserc_award_z`. Groups with only one observation receive `NA` rather than `NaN`.
+
 ```{r}
-# Apply the function
-cihr_data <- cihr_data %>%
-  dplyr::mutate(dplyr::across(everything(), code_fix))
+# Compute group-level statistics with exactly one row per grant, retained as a
+# separate object for review
+group_year_stats <- nserc_grant_funding |>
+  group_by(CommitteeNameEN, FiscalYear) |>
+  summarise(
+    mean_award = mean(AwardAmount, na.rm = TRUE),
+    sd_award   = sd(AwardAmount, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Join stats back and compute z-score; single-observation groups receive NA
+nserc_data <- nserc_data |>
+  left_join(group_year_stats, by = c("CommitteeNameEN", "FiscalYear")) |>
+  mutate(
+    nserc_award_z = if_else(sd_award > 0, (AwardAmount - mean_award) / sd_award, NA_real_)
+  ) |>
+  select(-mean_award, -sd_award)
 ```
 
-Convert the CIHR_Contribution column to numeric, removing the `$` and `,`.
+# Author Identity Review
+
+`nserc_id_links` and `plos_id_links` each flag cases where the same author likely generated more than one `combined_id` within a single source, either because of a mid-grant institution change (NSERC) or an inconsistently recorded affiliation (PLOS). For each flagged group, the variant that should be treated as canonical is whichever one already matches a record in the *other* dataset, since that is the spelling that actually allows the grant and the publication to join together.
+
 ```{r}
-cihr_data$CIHR_Contribution <- as.numeric(gsub("[\\$,]", "", cihr_data$CIHR_Contribution))
+nserc_combined_ids <- unique(nserc_data$combined_id)
+plos_combined_ids  <- unique(OA_PLOS_Data$combined_id)
+
+# Within each linked group, check how many variants already match the other
+# dataset. Exactly one match means that variant is the correct canonical
+# spelling. Zero matches means neither variant has a counterpart in the other
+# dataset, so there is no basis yet to prefer one over the other, and the
+# group is left unresolved. More than one match means the group is handled
+# by the recency tie-break below instead.
+resolve_via_cross_match <- function(links, match_against) {
+  links |>
+    group_by(source_id) |>
+    summarise(
+      n_matches    = sum(combined_id %in% match_against),
+      canonical_id = if (sum(combined_id %in% match_against) == 1) {
+        combined_id[combined_id %in% match_against]
+      } else {
+        NA_character_
+      },
+      .groups = "drop"
+    )
+}
+
+nserc_resolution <- resolve_via_cross_match(nserc_id_links, plos_combined_ids)
+plos_resolution  <- resolve_via_cross_match(plos_id_links,  nserc_combined_ids)
+
+# Map every variant in a resolved group onto that group's canonical spelling
+build_canonical_map <- function(links, resolution, reason) {
+  links |>
+    left_join(resolution, by = "source_id") |>
+    filter(!is.na(canonical_id), combined_id != canonical_id) |>
+    distinct(combined_id, canonical_id) |>
+    mutate(reason = reason)
+}
+
+canonical_id_map_auto <- bind_rows(
+  build_canonical_map(nserc_id_links, nserc_resolution, "exact match: this spelling already exists in PLOS"),
+  build_canonical_map(plos_id_links,  plos_resolution,  "exact match: this spelling already exists in NSERC")
+)
 ```
 
-Extract grant year from Competition_CD (year is the first 4 digits)
+Groups where more than one variant already matches the other dataset can also be resolved automatically: whichever variant was linked to the most recent NSERC instalment, across the researcher's full NSERC history, is preferred as canonical. Both the NSERC-side and PLOS-side checks use this same researcher-level recency, so a given identity always resolves to the same canonical spelling no matter which side flagged it as ambiguous. If two variants are tied on recency, the first one encountered is used.
+
 ```{r}
-cihr_data$Year <- as.numeric(stringr::str_extract(cihr_data$Competition_CD, "^[0-9]{4}"))
+# Most recent FiscalYear per combined_id, across all of that identity's grants
+combined_id_total_recency <- combined_id_recency |>
+  group_by(combined_id) |>
+  summarise(last_fiscal_year = max(last_fiscal_year), .groups = "drop")
+
+# Within each ambiguous group, pick the variant linked to the most recent
+# FiscalYear as canonical. which.max() returns the first match on a tie, so
+# ties resolve to whichever variant appears first without any extra handling.
+resolve_ambiguous_by_recency <- function(ambiguous_links, recency_lookup, join_cols, reason) {
+  ambiguous_links |>
+    left_join(recency_lookup, by = join_cols) |>
+    mutate(last_fiscal_year = replace_na(last_fiscal_year, -Inf)) |>
+    group_by(source_id) |>
+    mutate(canonical_id = combined_id[which.max(last_fiscal_year)]) |>
+    ungroup() |>
+    filter(combined_id != canonical_id) |>
+    distinct(combined_id, canonical_id) |>
+    mutate(reason = reason)
+}
+
+nserc_ambiguous <- nserc_id_links |>
+  semi_join(filter(nserc_resolution, n_matches > 1), by = "source_id")
+
+plos_ambiguous <- plos_id_links |>
+  semi_join(filter(plos_resolution, n_matches > 1), by = "source_id")
+
+canonical_id_map_ambiguous <- bind_rows(
+  resolve_ambiguous_by_recency(
+    nserc_ambiguous,
+    combined_id_total_recency,
+    join_cols = "combined_id",
+    reason = "multiple variants already matched PLOS; chose the one linked to the most recent NSERC instalment across the researcher's full NSERC history"
+  ),
+  resolve_ambiguous_by_recency(
+    plos_ambiguous,
+    combined_id_total_recency,
+    join_cols = "combined_id",
+    reason = "multiple variants already matched NSERC; chose the one linked to the most recent NSERC instalment across the researcher's full NSERC history"
+  )
+)
 ```
 
-CIHR Project grants can sometimes have multiple recipients associated with a single award. The first author is typically the main author. We will keep only the first author.
+Every flagged group is resolved automatically; there is no manual review step. To keep a record of what was merged and why, every resolution is written out to a log file, with the `reason` column distinguishing an exact cross-dataset match from a recency tie-break. This is useful for spot-checking that the merges look sensible, since nothing here blocks the pipeline from running end to end.
+
 ```{r}
-# Keep only the first author (everything before the first semicolon)
-cihr_data <- cihr_data %>% mutate(Name = trimws(sub(";.*", "", Name)))
+canonical_id_log <- bind_rows(canonical_id_map_auto, canonical_id_map_ambiguous)
+
+canonical_id_log |>
+  arrange(reason, combined_id) |>
+  write_csv(here("data", "intermediate-data", "canonical_id_resolution_log.csv"))
+
+canonical_id_map <- canonical_id_log |>
+  distinct(combined_id, canonical_id)
 ```
 
-Parse recipient names into separate components.
+Define a helper function that applies the canonical id mapping to any data frame containing a `combined_id` column. Using a join rather than `recode()` means this works safely even if `canonical_id_map` is empty, for example if no ambiguous groups were ever flagged.
+
 ```{r}
-# Using format_reverse to prepare names for the parse_names function
-cihr_data$Name <- humaniformat::format_reverse(cihr_data$Name)
-
-# Splitting names into components
-cihr_data <- cbind(cihr_data, parse_names(cihr_data$Name))
-
-# Removing original name column
-cihr_data <- select(cihr_data, -Name)
-```
-
-Use the function created above in the PLOS section to standardize important text columns.
-```{r}
-# Select columns to standardize
-cols_to_clean3 <- c("Institution_Paid", "first_name", "last_name")
-
-# Apply standardizing function and create combined variable
-cihr_data <- cihr_data %>%
-  mutate(across(all_of(cols_to_clean3), standardize_text)) %>%
-  mutate(combined_id = paste(first_name, last_name, Institution_Paid, sep = "_"))
+apply_canonical_id <- function(df) {
+  df |>
+    left_join(canonical_id_map, by = "combined_id") |>
+    mutate(combined_id = coalesce(canonical_id, combined_id)) |>
+    select(-canonical_id)
+}
 ```
 
 # Final Data Wrangling
 
 ## Clean the Data
- 
-Standardize column names and types across all three datasets.
- 
+
+Standardize column names and select only the columns needed downstream. The canonical id mapping from the Author Identity Review section is applied to both `publications` and `nserc_grants` here, so that any authors confirmed to share an identity are merged before the joins. A `distinct()` follows immediately after, since merging two combined_id variants onto the same canonical value can otherwise leave identical duplicate rows behind (for example, a grant that was originally split across two institution-linked combined_ids). Note that `nserc_award_z` is explicitly retained in `nserc_grants` so it can be carried through to the publication- and author-level summaries.
+
 ```{r}
 publications <- OA_PLOS_Data |>
   mutate(doi = sub("^https://doi.org/", "", doi)) |>
   rename(DOI = doi) |>
-  select(DOI, combined_id, author_position, is_corresponding, publication_year, funders)
- 
+  select(DOI, combined_id, author_position, is_corresponding, publication_year, funders) |>
+  apply_canonical_id() |>
+  distinct()
+
 nserc_grants <- nserc_data |>
-  select(combined_id, FiscalYear, AwardAmount) |>
-  mutate(FiscalYear = as.integer(FiscalYear))
- 
-cihr_grants <- cihr_data |>
-  select(combined_id, Year, CIHR_Contribution) |>
-  mutate(Year = as.integer(Year))
+  select(combined_id, FiscalYear, AwardAmount, nserc_award_z) |>
+  mutate(FiscalYear = as.integer(FiscalYear)) |>
+  apply_canonical_id() |>
+  distinct()
 ```
- 
----
- 
+
 ## Summarise Grants
- 
+
 ### Publication-level: largest grant within a 5-year lookback window
- 
-For each publication, find grants awarded to the same author within 4 years before publication, then keep only the largest.
- 
+
+For each publication, find NSERC grants awarded to the same author within the 4 years before publication. Because z-scores are standardized within committee by fiscal year groups, the grant with the highest raw amount and the grant with the highest z-score may reflect different awards; both are retained as independent columns.
+
 ```{r}
 nserc_pub_matches <- publications |>
   mutate(year_minus_4 = publication_year - 4) |>
@@ -324,75 +615,49 @@ nserc_pub_matches <- publications |>
   ) |>
   select(-year_minus_4) |>
   filter(AwardAmount > 0) |>
-  rename(nserc_top_year_5yr = FiscalYear, nserc_top_award_5yr = AwardAmount) |>
   group_by(DOI, combined_id) |>
-  slice_max(nserc_top_award_5yr, n = 1, na_rm = TRUE, with_ties = FALSE) |>
-  ungroup() |>
-  select(DOI, combined_id, nserc_top_year_5yr, nserc_top_award_5yr)
- 
-cihr_pub_matches <- publications |>
-  mutate(year_minus_4 = publication_year - 4) |>
-  left_join(
-    cihr_grants,
-    join_by(combined_id, y$Year <= x$publication_year, y$Year >= x$year_minus_4)
-  ) |>
-  select(-year_minus_4) |>
-  filter(CIHR_Contribution > 0) |>
-  rename(cihr_top_year_5yr = Year, cihr_top_award_5yr = CIHR_Contribution) |>
-  group_by(DOI, combined_id) |>
-  slice_max(cihr_top_award_5yr, n = 1, na_rm = TRUE, with_ties = FALSE) |>
-  ungroup() |>
-  select(DOI, combined_id, cihr_top_year_5yr, cihr_top_award_5yr)
+  summarise(
+    nserc_top_year_5yr  = FiscalYear[which.max(AwardAmount)],
+    nserc_top_award_5yr = max(AwardAmount),
+    nserc_top_z_5yr     = max(nserc_award_z, na.rm = TRUE),
+    .groups = "drop"
+  )
 ```
- 
+
 ### Author-level: largest grant ever received
- 
-For each author, find their single largest award from each funding source and count their total number of awards. A `full_join` gives every author a single row with columns for both funding sources. Authors with only one source will have `NA` in the other source's columns.
- 
+
+For each author, find their single largest NSERC grant and highest z-score across all years, along with a total count of their awards. As with the publication-level summary, the largest raw award and the highest z-score are tracked independently, as they may correspond to different grants.
+
 ```{r}
-author_funding <- full_join(
-  nserc_grants |>
-    group_by(combined_id) |>
-    summarise(
-      nserc_top_year_all  = FiscalYear[which.max(AwardAmount)],
-      n_awards_nserc      = n(),
-      nserc_top_award_all = max(AwardAmount)
-    ),
-  cihr_grants |>
-    group_by(combined_id) |>
-    summarise(
-      cihr_top_year_all  = Year[which.max(CIHR_Contribution)],
-      n_awards_cihr      = n(),
-      cihr_top_award_all = max(CIHR_Contribution)
-    ),
-  by = "combined_id"
-)
+author_funding <- nserc_grants |>
+  group_by(combined_id) |>
+  summarise(
+    nserc_top_year_all  = FiscalYear[which.max(AwardAmount)],
+    n_awards_nserc      = n(),
+    nserc_top_award_all = max(AwardAmount),
+    nserc_top_z_all     = max(nserc_award_z, na.rm = TRUE)
+  )
 ```
- 
----
- 
+
 ## Build Final Dataset
- 
+
 Join everything onto the main PLOS dataset in a single pipeline. Each join adds a distinct set of columns, giving one row per DOI + author with no duplication.
- 
+
 ```{r}
 PLOS_Data_Full <- PLOS_Data |>
-  left_join(publications, by = "DOI") |>
-  # Publication-level: largest grant within 5-year lookback window
+  left_join(publications,      by = "DOI") |>
   left_join(nserc_pub_matches, by = c("DOI", "combined_id")) |>
-  left_join(cihr_pub_matches,  by = c("DOI", "combined_id")) |>
-  # Author-level: largest grant the author ever received
-  left_join(author_funding, by = "combined_id")
+  left_join(author_funding,    by = "combined_id")
 ```
- 
-The final object has one row per **DOI + author** with four distinct award columns:
- 
+
+The final object has one row per **DOI + author** with four NSERC award columns:
+
 | Column | Meaning |
 |---|---|
 | `nserc_top_award_5yr` | Largest NSERC grant within the 5-year lookback window |
-| `cihr_top_award_5yr` | Largest CIHR grant within the 5-year lookback window |
+| `nserc_top_z_5yr` | Highest NSERC z-score within the 5-year lookback window (may reflect a different grant than `nserc_top_award_5yr`) |
 | `nserc_top_award_all` | Largest NSERC grant the author has ever received |
-| `cihr_top_award_all` | Largest CIHR grant the author has ever received |
+| `nserc_top_z_all` | Highest NSERC z-score the author has ever received (may reflect a different grant than `nserc_top_award_all`) |
 
 Saving the final master dataset.
 

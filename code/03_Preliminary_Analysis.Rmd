@@ -30,7 +30,7 @@ PLOS_Data_Full <- readRDS(here("data", "clean-data", "Cleaned_Master_Data.rds"))
 Sub-setting the master dataset into two separate datasets specific to my diffrent questions.
 ```{r}
 # ~~ 1. DOI-level dataset ~~
-# One row per DOI, keeping the largest NSERC and CIHR award across all authors
+# One row per DOI, keeping the largest NSERC award across all authors
 doi_data <- PLOS_Data_Full |>
   group_by(DOI) |>
   summarise(
@@ -41,17 +41,16 @@ doi_data <- PLOS_Data_Full |>
              Data_Generated, Data_Shared, Data_Location,
              Code_Generated, Code_Shared, Code_Location,
              Quarter, source), first),
-    # Largest NSERC award across all authors on this DOI
+    # Largest raw NSERC award across all authors on this DOI
     nserc_top_award_5yr = max(nserc_top_award_5yr, na.rm = TRUE),
     nserc_top_year_5yr  = nserc_top_year_5yr[which.max(nserc_top_award_5yr)],
-    # Largest CIHR award across all authors on this DOI
-    cihr_top_award_5yr  = max(cihr_top_award_5yr, na.rm = TRUE),
-    cihr_top_year_5yr   = cihr_top_year_5yr[which.max(cihr_top_award_5yr)]
+    # Highest NSERC z-score across all authors on this DOI (may reflect a different author)
+    nserc_top_z_5yr     = max(nserc_top_z_5yr, na.rm = TRUE)
   ) |>
-  # max() returns -Inf for all-NA groups, convert back to NA
+  # max() returns -Inf for all-NA groups; convert back to NA
   mutate(
     nserc_top_award_5yr = na_if(nserc_top_award_5yr, -Inf),
-    cihr_top_award_5yr  = na_if(cihr_top_award_5yr,  -Inf)
+    nserc_top_z_5yr     = na_if(nserc_top_z_5yr,     -Inf)
   ) |>
   ungroup()
 
@@ -63,22 +62,26 @@ author_data <- PLOS_Data_Full |>
     n_publications = n_distinct(DOI),
     # Data sharing
     n_data_generated = sum(Data_Generated == TRUE, na.rm = TRUE),
-    n_data_shared = sum(Data_Shared == TRUE,    na.rm = TRUE),
-    n_data_linked = sum(str_detect(Data_Location, regex("online", ignore_case = TRUE)), na.rm = TRUE),
-    data_locations = paste(sort(unique(na.omit(Data_Location))), collapse = "; "),
+    n_data_shared    = sum(Data_Shared == TRUE,    na.rm = TRUE),
+    n_data_linked    = sum(str_detect(Data_Location, regex("online", ignore_case = TRUE)), na.rm = TRUE),
+    data_locations   = paste(sort(unique(na.omit(Data_Location))), collapse = "; "),
     # Code sharing
     n_code_generated = sum(Code_Generated == TRUE, na.rm = TRUE),
-    n_code_shared = sum(Code_Shared == TRUE,    na.rm = TRUE),
-    code_locations = paste(sort(unique(na.omit(Code_Location))), collapse = "; "),
-    # Funding info
+    n_code_shared    = sum(Code_Shared == TRUE,    na.rm = TRUE),
+    code_locations   = paste(sort(unique(na.omit(Code_Location))), collapse = "; "),
+    # Funding info (author-level columns are identical across rows, so first() is safe)
     nserc_top_award_all = first(nserc_top_award_all),
-    nserc_top_year_all = first(nserc_top_year_all),
-    n_awards_nserc = first(n_awards_nserc),
-    cihr_top_award_all = first(cihr_top_award_all),
-    cihr_top_year_all = first(cihr_top_year_all),
-    n_awards_cihr = first(n_awards_cihr)
+    nserc_top_year_all  = first(nserc_top_year_all),
+    nserc_top_z_all     = first(nserc_top_z_all),
+    n_awards_nserc      = first(n_awards_nserc)
   ) |>
   ungroup()
+```
+
+Subsetting to only authors with an award.
+```{r}
+author_data_sub <- author_data |>
+  filter(!is.na(nserc_top_z_all))
 ```
 
 # Exploration
