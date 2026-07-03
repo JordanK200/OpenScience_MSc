@@ -8,6 +8,12 @@ data/**
 # Allow README files anywhere under data
 !data/**/README.md
 
+# Allow Data Dictonaries anywhere under data
+!data/**/Data_Dictionary.md
+
+# Sample data
+!data/sample-data/**
+
 # Ignore WIP directory
 /WIP
 

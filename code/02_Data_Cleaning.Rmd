@@ -639,7 +639,9 @@ author_funding <- nserc_grants |>
   )
 ```
 
-## Build Final Dataset
+## Build Final Datasets
+
+### Master Dataset
 
 Join everything onto the main PLOS dataset in a single pipeline. Each join adds a distinct set of columns, giving one row per DOI + author with no duplication.
 
@@ -659,8 +661,110 @@ The final object has one row per **DOI + author** with four NSERC award columns:
 | `nserc_top_award_all` | Largest NSERC grant the author has ever received |
 | `nserc_top_z_all` | Highest NSERC z-score the author has ever received (may reflect a different grant than `nserc_top_award_all`) |
 
-Saving the final master dataset.
+Saving the final master dataset as an rds file to accommodate the nested columns.
 
 ```{r}
 saveRDS(PLOS_Data_Full, file = here("data", "clean-data", "Cleaned_Master_Data.rds"))
+```
+
+Saving the final master dataset as a csv with funding info collapsed into a single readable string column.
+```{r}
+PLOS_Data_Full |>
+  mutate(funders = map_chr(funders, ~ if (is.null(.x) || nrow(.x) == 0) NA_character_ else
+      paste(.x$funder_name, collapse = "; "))) |>
+  write_csv(here("data", "clean-data", "Cleaned_Master_Data.csv"))
+```
+
+
+### DOI-Level Dataset
+
+Collapse `PLOS_Data_Full` to one row per DOI, keeping the largest NSERC award across all authors on that publication. Publication-level columns are identical across all rows within a DOI, so `first()` is safe to use on them.
+
+Two small helpers handle groups where every author is missing an NSERC match: `safe_max()` returns `NA` instead of `-Inf`, and `pick_at_max()` looks up the year tied to the top award. `pick_at_max()` must run on `nserc_top_award_5yr` before that name gets reassigned by `safe_max()` below it, since `summarise()` would otherwise resolve later lines against the new value instead of the original per-author one.
+
+```{r}
+safe_max <- function(x) if (all(is.na(x))) NA_real_ else max(x, na.rm = TRUE)
+
+pick_at_max <- function(pick, by) if (all(is.na(by))) NA else pick[which.max(by)]
+
+doi_data <- PLOS_Data_Full |>
+  group_by(DOI) |>
+  summarise(
+    # Keep publication-level columns (same for all rows within a DOI)
+    across(c(Publication_Day, Publication_Month, Publication_Year,
+             Primary_Topic_Field, Primary_Topic_Subfield,
+             Corresponding_Author_Country, First_Author_Country,
+             Data_Generated, Data_Shared, Data_Location,
+             Code_Generated, Code_Shared, Code_Location,
+             Quarter, source), first),
+    nserc_top_year_5yr  = pick_at_max(nserc_top_year_5yr, nserc_top_award_5yr),
+    # Largest raw NSERC award across all authors on this DOI
+    nserc_top_award_5yr = safe_max(nserc_top_award_5yr),
+    # Highest NSERC z-score across all authors on this DOI (may reflect a different author)
+    nserc_top_z_5yr     = safe_max(nserc_top_z_5yr)
+  ) |>
+  ungroup()
+```
+
+Saving the DOI-level dataset.
+
+```{r}
+write_csv(doi_data, file = here("data", "clean-data", "DOI_Level_Data.csv"))
+```
+
+### Author-Level Dataset
+
+Collapse `PLOS_Data_Full` to one row per author (`combined_id`), summarising data and code sharing across all of that author's publications. Author-level funding columns are identical across rows for a given author, so `first()` is safe to use on them.
+
+```{r}
+author_data <- PLOS_Data_Full |>
+  group_by(combined_id) |>
+  summarise(
+    n_publications = n_distinct(DOI),
+    # Data sharing
+    n_data_generated = sum(Data_Generated == TRUE, na.rm = TRUE),
+    n_data_shared    = sum(Data_Shared == TRUE,    na.rm = TRUE),
+    n_data_linked    = sum(str_detect(Data_Location, regex("online", ignore_case = TRUE)), na.rm = TRUE),
+    data_locations   = paste(sort(unique(na.omit(Data_Location))), collapse = "; "),
+    # Code sharing
+    n_code_generated = sum(Code_Generated == TRUE, na.rm = TRUE),
+    n_code_shared    = sum(Code_Shared == TRUE,    na.rm = TRUE),
+    code_locations   = paste(sort(unique(na.omit(Code_Location))), collapse = "; "),
+    # Funding info (author-level columns are identical across rows, so first() is safe)
+    nserc_top_award_all = first(nserc_top_award_all),
+    nserc_top_year_all  = first(nserc_top_year_all),
+    nserc_top_z_all     = first(nserc_top_z_all),
+    n_awards_nserc      = first(n_awards_nserc)
+  ) |>
+  ungroup()
+```
+
+Subsetting to only authors with an award.
+
+```{r}
+author_data <- author_data |>
+  filter(!is.na(nserc_top_z_all))
+```
+
+Saving the author-level dataset.
+
+```{r}
+write_csv(author_data, file = here("data", "clean-data", "Author_Level_Data.csv"))
+```
+
+### Sample Datasets
+
+Creating sample datasets that will accompany the pre-registration to help provide context.
+
+```{r}
+# Set Seed
+set.seed(200)
+
+# Master Dataset Sample
+Master_Sample <- slice_sample(PLOS_Data_Full, n = 1000)
+write_csv(Master_Sample, here("data", "sample-data", "Master_Sample.csv"))
+
+# Author Dataset Sample
+Author_Sample <- slice_sample(author_data, n = 250)
+write_csv(Author_Sample, here("data", "sample-data", "Author_Sample.csv"))
 ```
