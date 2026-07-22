@@ -7,7 +7,7 @@ output: html_document
 
 # Introduction
 
-This file documents the preliminary exploration of our dataset, conducted before pre-registration. No exploratory analysis was performed that is not recorded here. Therefore, this file provides important context for further analyses.
+This file documents the preliminary exploration of our dataset, conducted before pre-registration. Therefore, this file provides important context for further analyses.
 
 # Preparations
 
@@ -35,4 +35,9 @@ n_distinct(author_data$combined_id)
 Checking the number of authors with multiple publications:
 ```{r}
 table(author_data$n_publications)
+```
+
+Checking the number of authors with multiple awards:
+```{r}
+table(author_data$n_awards_nserc)
 ```
