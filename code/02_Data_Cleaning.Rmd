@@ -107,17 +107,24 @@ funder_df <- PLOS_Data$DOI |>
     funder_doi   = DOI,
     funder_award = award
   ) |>
+  mutate(doi = str_to_lower(doi)) |>
   group_by(doi) |>
   nest(funders = c(funder_name, funder_doi, funder_award))
 
-# Pull Open Alex metadata and join Crossref funder information
+# Pull Open Alex metadata and join Crossref funder information and source label
 OA_PLOS_Data <- oa_fetch(doi = PLOS_Data$DOI) |>
-  mutate(doi_clean = str_remove(doi, "https://doi.org/")) |>
+  mutate(doi_clean = str_to_lower(str_remove(doi, "https://doi.org/"))) |>
   left_join(funder_df, by = c("doi_clean" = "doi")) |>
+  left_join(
+    PLOS_Data |>
+      mutate(doi_clean = str_to_lower(DOI)) |>
+      select(doi_clean, source),
+    by = "doi_clean"
+  ) |>
   select(-doi_clean)
 
 # Save to intermediate file
-saveRDS(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.rds"))
+# saveRDS(OA_PLOS_Data, file = here("data/intermediate-data/OA_PLOS_Hold.rds"))
 ```
 
 Load the saved intermediate file. This chunk always runs, regardless of whether the chunk above was re-run.
@@ -670,8 +677,13 @@ saveRDS(PLOS_Data_Full, file = here("data", "clean-data", "Cleaned_Master_Data.r
 Saving the final master dataset as a csv with funding info collapsed into a single readable string column.
 ```{r}
 PLOS_Data_Full |>
-  mutate(funders = map_chr(funders, ~ if (is.null(.x) || nrow(.x) == 0) NA_character_ else
-      paste(.x$funder_name, collapse = "; "))) |>
+  mutate(funders = map_chr(funders, ~ {
+    if (is.null(.x) || nrow(.x) == 0) {
+      NA_character_
+    } else {
+      paste(.x$funder_name, collapse = "; ")
+    }
+  })) |>
   write_csv(here("data", "clean-data", "Cleaned_Master_Data.csv"))
 ```
 

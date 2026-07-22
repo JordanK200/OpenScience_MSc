@@ -24,3 +24,15 @@ PLOS_Data_Full  <- readRDS(here("data", "clean-data", "Cleaned_Master_Data.rds")
 doi_data        <- read_csv(here("data", "clean-data", "DOI_Level_Data.csv"))
 author_data     <- read_csv(here("data", "clean-data", "Author_Level_Data.csv"))
 ```
+
+# Summary Stats
+
+Checking the number of unique authors:
+```{r}
+n_distinct(author_data$combined_id)
+```
+
+Checking the number of authors with multiple publications:
+```{r}
+table(author_data$n_publications)
+```
