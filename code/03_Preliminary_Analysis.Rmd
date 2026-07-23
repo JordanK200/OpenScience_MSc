@@ -18,6 +18,41 @@ library(tidyverse)
 library(here)
 ```
 
+Clean data files are stored in a public OSF project. The code below checks whether each file already exists locally before downloading, so repeated runs do not re-fetch files unnecessarily.
+
+OSF project: https://osf.io/kgpyd/
+
+```{r}
+# Each file: its name on OSF, and where to save it locally
+files <- list(
+  list(name = "Cleaned_Master_Data.rds",            path = here("data", "clean-data", "Cleaned_Master_Data.rds")),
+  list(name = "DOI_Level_Data.csv", path = here("data", "clean-data", "DOI_Level_Data.csv")),
+  list(name = "Author_Level_Data.csv",           path = here("data", "clean-data", "Author_Level_Data.csv"))
+)
+
+# Create the folder if it isn't there yet
+dir.create(here("data", "clean-data"), recursive = TRUE, showWarnings = FALSE)
+
+# List all files in the OSF project (no login needed if it's public)
+osf_files <- osf_retrieve_node("https://osf.io/kgpyd/") |>  # <- your project ID
+  osf_ls_files()
+
+# Download anything not already saved
+walk(files, ~{
+  if (!file.exists(.x$path)) {
+    message("Downloading: ", .x$path)
+    osf_files |>
+      filter(name == .x$name) |>            # pick the file we want
+      # path is a folder, not a filename — the file keeps its OSF name
+      osf_download(path = dirname(.x$path), conflicts = "skip")
+  } else {
+    message("Already exists: ", .x$path)
+  }
+})
+
+rm(files, osf_files)
+```
+
 Loading data. The master dataset, the DOI-, and the author-level subsets are all created in `02_Data_Cleaning.Rmd`:
 ```{r}
 PLOS_Data_Full  <- readRDS(here("data", "clean-data", "Cleaned_Master_Data.rds"))

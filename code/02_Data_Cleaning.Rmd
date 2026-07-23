@@ -38,7 +38,7 @@ Raw NSERC data can also be downloaded independently using the 01_NSERC_scrape.R 
 
 PLOS data can also be downloaded independently from: https://plos.figshare.com/articles/dataset/PLOS_Open_Science_Indicators/21687686
 
-OSF project: https://osf.io/8dtek/
+OSF project: https://osf.io/9ygbw/
 
 ```{r}
 # Each file: its name on OSF, and where to save it locally
@@ -52,7 +52,7 @@ files <- list(
 dir.create(here("data", "raw-data"), recursive = TRUE, showWarnings = FALSE)
 
 # List all files in the OSF project (no login needed if it's public)
-osf_files <- osf_retrieve_node("https://osf.io/8dtek/") |>  # <- your project ID
+osf_files <- osf_retrieve_node("https://osf.io/9ygbw/") |>  # <- your project ID
   osf_ls_files()
 
 # Download anything not already saved
