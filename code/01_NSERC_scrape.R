@@ -5,7 +5,7 @@ library(httr2)
 library(tidyverse)
 library(readxl)
 
-# Link to NSERC's Awards Data
+# Base dataset URL
 page_url <- "https://open.canada.ca/data/en/dataset/c1b0f627-8c29-427c-ab73-33968ad9176e"
 
 # Create a session temp directory for downloads
@@ -14,15 +14,26 @@ dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE)
 
 message("Using temp directory: ", tmp_dir)
 
-# Scrape all links on the page
-links <- read_html(page_url) %>%
-  html_elements("a") %>%
-  html_attr("href") %>%
-  unique() %>%
-  na.omit()
+# Helper: scrape all <a href> links from a single results page
+scrape_page_links <- function(res_page) {
+  url <- str_c(page_url, "?res_page=", res_page, "#resources")
+  
+  Sys.sleep(2)  # be polite—pause between requests
+  
+  read_html(url) %>%
+    html_elements("a") %>%
+    html_attr("href") %>%
+    discard(is.na)
+}
 
-# Make absolute URLs if needed
-links <- url_absolute(links, page_url)
+# Walk pages until one returns no new file links.
+# Adjust `max_pages` up if the dataset ever grows.
+max_pages <- 15
+
+links <- map(1:max_pages, scrape_page_links) %>%
+  list_c() %>%
+  unique() %>%
+  url_absolute(page_url)
 
 # Extract fiscal year from award/Expenditures file names
 link_tbl <- tibble(

@@ -24,7 +24,7 @@ library(readxl)
 library(textclean)
 library(humaniformat)
 library(stringi)
-library(googledrive)
+library(osfr)
 library(here)
 library(openalexR)
 library(stringdist)
@@ -32,43 +32,43 @@ library(stringdist)
 
 # Data Download
 
-Raw data files are stored in a public Google Drive folder. The code below checks whether each file already exists locally before downloading, so repeated runs do not re-fetch files unnecessarily.
+Raw data files are stored in a public OSF project. The code below checks whether each file already exists locally before downloading, so repeated runs do not re-fetch files unnecessarily.
 
-Raw NSERC data can also be downloaded independently using the `01_NSERC_scrape.R` script.
+Raw NSERC data can also be downloaded independently using the 01_NSERC_scrape.R script.
 
-Data folder: https://drive.google.com/drive/folders/1FSxIsOkGuVqUTiFzEPaC4xpr_r5OvzNJ?usp=sharing
+PLOS data can also be downloaded independently from: https://plos.figshare.com/articles/dataset/PLOS_Open_Science_Indicators/21687686
+
+OSF project: https://osf.io/8dtek/
 
 ```{r}
-# Define each file as a list of its Google Drive URL and target local path
+# Each file: its name on OSF, and where to save it locally
 files <- list(
-  list(
-    id   = "https://drive.google.com/file/d/1JPSHpU8EMPeviTDvPFmbX4Nua6gcUcd4/view?usp=sharing",
-    path = here("data", "raw-data", "RAW_PLOS.csv")
-  ),
-  list(
-    id   = "https://drive.google.com/file/d/1v9Ho0FVOsazANgoNBgFRqKMzxdUwiTwy/view?usp=sharing",
-    path = here("data", "raw-data", "RAW_PLOS_Comparator.csv")
-  ),
-  list(
-    id   = "https://drive.google.com/file/d/1p9VTGlxzndML6PDjCJ_r4Ve4ku1RXVOV/view?usp=share_link",
-    path = here("data", "raw-data", "RAW_NSERC.csv")
-  )
+  list(name = "RAW_PLOS.csv",            path = here("data", "raw-data", "RAW_PLOS.csv")),
+  list(name = "RAW_PLOS_Comparator.csv", path = here("data", "raw-data", "RAW_PLOS_Comparator.csv")),
+  list(name = "RAW_NSERC.csv",           path = here("data", "raw-data", "RAW_NSERC.csv"))
 )
 
-# Authenticate with deauth() so public files can be accessed without logging in
-drive_deauth()
+# Create the folder if it isn't there yet
+dir.create(here("data", "raw-data"), recursive = TRUE, showWarnings = FALSE)
 
-# Download any files not already present locally
+# List all files in the OSF project (no login needed if it's public)
+osf_files <- osf_retrieve_node("https://osf.io/8dtek/") |>  # <- your project ID
+  osf_ls_files()
+
+# Download anything not already saved
 walk(files, ~{
   if (!file.exists(.x$path)) {
     message("Downloading: ", .x$path)
-    drive_download(as_id(.x$id), path = .x$path, overwrite = FALSE)
+    osf_files |>
+      filter(name == .x$name) |>            # pick the file we want
+      # path is a folder, not a filename — the file keeps its OSF name
+      osf_download(path = dirname(.x$path), conflicts = "skip")
   } else {
     message("Already exists: ", .x$path)
   }
 })
 
-rm(files)
+rm(files, osf_files)
 ```
 
 # PLOS Data Cleaning
